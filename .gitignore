@@ -48,5 +48,7 @@ design_handoff*/
 # Local working notes and agent instructions: personal, machine-specific,
 # and full of pointers into a home directory. Kept on disk, out of the repo.
 docs/design/
+docs/superpowers/
+.claude/settings.local.json
 CLAUDE.local.md
 .worktrees/

@@ -36,13 +36,14 @@ GMP_API_TARGET=http://localhost:8085 npm run dev
 ## Checks
 
 ```bash
-go vet ./... && go test ./...
-golangci-lint run ./...            # the tree is clean; keep it clean
-cd web && npx tsc --noEmit && npx vitest run
-node scripts/verify-controls.mjs   # 37/37, needs both servers running
+make ci      # gofmt, go vet, go test, golangci-lint, tsc --noEmit, vitest
+make hooks   # once per clone: enable the pre-commit gate
 ```
 
-CI runs all of it on every pull request.
+CI runs the same plus a Vite build and the Playwright control contract
+(37/37). Screenshots and that contract live in `web/scripts/` and are driven by
+the **visual-verify** skill — use it before claiming a scene or control change
+works.
 
 ## Repo-specific gotchas
 

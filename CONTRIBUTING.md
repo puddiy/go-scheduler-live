@@ -46,6 +46,7 @@ If :8080 is taken, move the backend and tell the proxy where it went:
 Before opening a pull request:
 
 ```bash
+make ci                          # all of the below except the control contract
 go vet ./... && go test ./...    # scheduler invariants, scenario anti-regressions
 golangci-lint run ./...          # the CI gate; the tree is clean, keep it clean
 cd web && npx tsc --noEmit && npx vitest run

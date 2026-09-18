@@ -26,7 +26,7 @@ jobs:
           go-version-file: go.mod
       - name: Bake demo timelines
         run: go run ./cmd/bake -out web/public/runs
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm

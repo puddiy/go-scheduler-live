@@ -21,4 +21,12 @@ export default defineConfig({
   build: {
     outDir: 'dist',
   },
+  test: {
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'text-summary'],
+      // Pixi canvas scene is intentionally omitted from unit tests in favor of pure logic tests
+      exclude: ['src/scene/**', 'node_modules/**', 'dist/**'],
+    },
+  },
 })

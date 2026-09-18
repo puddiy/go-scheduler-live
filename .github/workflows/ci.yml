@@ -38,7 +38,14 @@ jobs:
 
       # Scenario tests record real traces in subprocesses, so this is the slow
       # job — and the one that actually asserts scheduler invariants.
-      - run: go test ./...
+      - name: Run tests and report coverage
+        run: |
+          go test -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out | tee coverage.txt
+          echo "### Go Coverage Summary" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          tail -n 25 coverage.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Cross-compile
         run: |
@@ -61,7 +68,13 @@ jobs:
 
       - run: npm ci
       - run: npx tsc --noEmit
-      - run: npx vitest run
+      - name: Run unit tests with coverage
+        run: |
+          npx vitest run --coverage | tee coverage.txt
+          echo "### Web Coverage Summary" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          tail -n 25 coverage.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
       - run: npx vite build
 
   controls:

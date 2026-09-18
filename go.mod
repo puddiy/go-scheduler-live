@@ -1,4 +1,4 @@
-module github.com/puddingtonnn/go-scheduler-live
+module github.com/puddiy/go-scheduler-live
 
 go 1.25.0
 

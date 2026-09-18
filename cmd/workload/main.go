@@ -15,7 +15,7 @@ import (
 	"runtime/trace"
 	"time"
 
-	"github.com/puddingtonnn/go-scheduler-live/internal/scenarios"
+	"github.com/puddiy/go-scheduler-live/internal/scenarios"
 )
 
 func main() {

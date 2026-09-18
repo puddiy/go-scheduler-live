@@ -2,10 +2,10 @@
 
 [English](README.md) · **Русский**
 
-[![ci](https://github.com/puddingtonnn/go-scheduler-live/actions/workflows/ci.yml/badge.svg)](https://github.com/puddingtonnn/go-scheduler-live/actions/workflows/ci.yml)
-[![Deploy static demo](https://github.com/puddingtonnn/go-scheduler-live/actions/workflows/pages.yml/badge.svg)](https://github.com/puddingtonnn/go-scheduler-live/actions/workflows/pages.yml)
+[![ci](https://github.com/puddiy/go-scheduler-live/actions/workflows/ci.yml/badge.svg)](https://github.com/puddiy/go-scheduler-live/actions/workflows/ci.yml)
+[![Deploy static demo](https://github.com/puddiy/go-scheduler-live/actions/workflows/pages.yml/badge.svg)](https://github.com/puddiy/go-scheduler-live/actions/workflows/pages.yml)
 
-### ▶ [Открыть живое демо](https://puddingtonnn.github.io/go-scheduler-live/) — ничего ставить не нужно
+### ▶ [Открыть живое демо](https://puddiy.github.io/go-scheduler-live/) — ничего ставить не нужно
 
 Учебная пиксель-арт визуализация **настоящего** планировщика Go: горутины (G) — гоферы, слоты выполнения (P) — изометрические станции, OS-потоки (M) — тележки с номерами. Плюс сборщик мусора, живая куча, кража работы, блокирующие сисколлы и stop-the-world паузы.
 

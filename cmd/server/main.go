@@ -7,8 +7,8 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/puddingtonnn/go-scheduler-live/internal/api"
-	"github.com/puddingtonnn/go-scheduler-live/internal/tracerun"
+	"github.com/puddiy/go-scheduler-live/internal/api"
+	"github.com/puddiy/go-scheduler-live/internal/tracerun"
 )
 
 func main() {

@@ -16,10 +16,10 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/puddingtonnn/go-scheduler-live/internal/scenarios"
-	"github.com/puddingtonnn/go-scheduler-live/internal/timeline"
-	"github.com/puddingtonnn/go-scheduler-live/internal/traceparse"
-	"github.com/puddingtonnn/go-scheduler-live/internal/tracerun"
+	"github.com/puddiy/go-scheduler-live/internal/scenarios"
+	"github.com/puddiy/go-scheduler-live/internal/timeline"
+	"github.com/puddiy/go-scheduler-live/internal/traceparse"
+	"github.com/puddiy/go-scheduler-live/internal/tracerun"
 )
 
 type bakedRun struct {

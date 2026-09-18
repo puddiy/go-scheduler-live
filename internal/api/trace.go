@@ -6,8 +6,8 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/puddingtonnn/go-scheduler-live/internal/timeline"
-	"github.com/puddingtonnn/go-scheduler-live/internal/traceparse"
+	"github.com/puddiy/go-scheduler-live/internal/timeline"
+	"github.com/puddiy/go-scheduler-live/internal/traceparse"
 )
 
 // maxUploadBytes/maxUploadEvents bound an arbitrary uploaded trace: unlike the

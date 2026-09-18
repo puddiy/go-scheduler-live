@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/puddingtonnn/go-scheduler-live/internal/timeline"
-	"github.com/puddingtonnn/go-scheduler-live/internal/tracerun"
+	"github.com/puddiy/go-scheduler-live/internal/timeline"
+	"github.com/puddiy/go-scheduler-live/internal/tracerun"
 )
 
 // fakeRunner returns committed trace bytes, so API tests never spawn a

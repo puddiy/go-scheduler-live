@@ -6,7 +6,7 @@ import (
 
 	exptrace "golang.org/x/exp/trace"
 
-	"github.com/puddingtonnn/go-scheduler-live/internal/timeline"
+	"github.com/puddiy/go-scheduler-live/internal/timeline"
 )
 
 // TestParseGolden parses a committed real trace and checks invariants rather

@@ -30,7 +30,7 @@ treat the workload subprocess as untrusted-adjacent code.
 ## Reporting a vulnerability
 
 Please report privately through
-[GitHub Security Advisories](https://github.com/puddingtonnn/go-scheduler-live/security/advisories/new)
+[GitHub Security Advisories](https://github.com/puddiy/go-scheduler-live/security/advisories/new)
 rather than a public issue.
 
 This is an educational project maintained in spare time, so please set

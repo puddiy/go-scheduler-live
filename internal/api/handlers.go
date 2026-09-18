@@ -15,10 +15,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/puddingtonnn/go-scheduler-live/internal/scenarios"
-	"github.com/puddingtonnn/go-scheduler-live/internal/timeline"
-	"github.com/puddingtonnn/go-scheduler-live/internal/traceparse"
-	"github.com/puddingtonnn/go-scheduler-live/internal/tracerun"
+	"github.com/puddiy/go-scheduler-live/internal/scenarios"
+	"github.com/puddiy/go-scheduler-live/internal/timeline"
+	"github.com/puddiy/go-scheduler-live/internal/traceparse"
+	"github.com/puddiy/go-scheduler-live/internal/tracerun"
 )
 
 // TraceRunner runs a workload and returns the raw execution-trace bytes.

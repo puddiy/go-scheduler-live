@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/puddingtonnn/go-scheduler-live/internal/timeline"
+	"github.com/puddiy/go-scheduler-live/internal/timeline"
 )
 
 func TestTraceUploadHappyPath(t *testing.T) {

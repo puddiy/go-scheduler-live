@@ -17,7 +17,7 @@ import (
 
 // workloadPkg is the import path of the workload command. Using the import path
 // (not a relative ./path) makes Run work from any directory inside the module.
-const workloadPkg = "github.com/puddingtonnn/go-scheduler-live/cmd/workload"
+const workloadPkg = "github.com/puddiy/go-scheduler-live/cmd/workload"
 
 // Request describes one workload run. A struct (rather than positional args)
 // keeps the two int fields from being mixed up at call sites.

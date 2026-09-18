@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/puddingtonnn/go-scheduler-live/internal/timeline"
-	"github.com/puddingtonnn/go-scheduler-live/internal/traceparse"
+	"github.com/puddiy/go-scheduler-live/internal/timeline"
+	"github.com/puddiy/go-scheduler-live/internal/traceparse"
 )
 
 // TestRunProducesParsableTrace runs the full pipeline: subprocess workload ->

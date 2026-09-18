@@ -13,7 +13,7 @@ import (
 
 	exptrace "golang.org/x/exp/trace"
 
-	"github.com/puddingtonnn/go-scheduler-live/internal/timeline"
+	"github.com/puddiy/go-scheduler-live/internal/timeline"
 )
 
 // Heap metric names forwarded to the frontend, discovered from real traces.

@@ -2,10 +2,10 @@
 
 **English** · [Русский](README_RUS.md)
 
-[![ci](https://github.com/puddingtonnn/go-scheduler-live/actions/workflows/ci.yml/badge.svg)](https://github.com/puddingtonnn/go-scheduler-live/actions/workflows/ci.yml)
-[![Deploy static demo](https://github.com/puddingtonnn/go-scheduler-live/actions/workflows/pages.yml/badge.svg)](https://github.com/puddingtonnn/go-scheduler-live/actions/workflows/pages.yml)
+[![ci](https://github.com/puddiy/go-scheduler-live/actions/workflows/ci.yml/badge.svg)](https://github.com/puddiy/go-scheduler-live/actions/workflows/ci.yml)
+[![Deploy static demo](https://github.com/puddiy/go-scheduler-live/actions/workflows/pages.yml/badge.svg)](https://github.com/puddiy/go-scheduler-live/actions/workflows/pages.yml)
 
-### ▶ [Open the live demo](https://puddingtonnn.github.io/go-scheduler-live/) — nothing to install
+### ▶ [Open the live demo](https://puddiy.github.io/go-scheduler-live/) — nothing to install
 
 An educational, pixel-art visualization of the **real** Go runtime scheduler: goroutines (G) as gophers, execution slots (P) as isometric stations, OS threads (M) as numbered carriers — plus the garbage collector, live heap, work stealing, blocking syscalls and stop-the-world pauses.
 

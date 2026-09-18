@@ -1,11 +1,11 @@
 blank_issues_enabled: true
 contact_links:
   - name: Try the live demo
-    url: https://puddingtonnn.github.io/go-scheduler-live/
+    url: https://puddiy.github.io/go-scheduler-live/
     about: Traces baked in CI — no install needed. Worth a look before reporting.
   - name: How the pipeline works
-    url: https://github.com/puddingtonnn/go-scheduler-live/blob/main/docs/architecture.md
+    url: https://github.com/puddiy/go-scheduler-live/blob/main/docs/architecture.md
     about: Package boundaries, what is real versus reconstructed, and the traps.
   - name: Security concerns
-    url: https://github.com/puddingtonnn/go-scheduler-live/security/policy
+    url: https://github.com/puddiy/go-scheduler-live/security/policy
     about: Report privately. Note the dev server is not meant to face the internet.

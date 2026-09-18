@@ -11,12 +11,12 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "pixi.js": "^8.19.0"
+    "pixi.js": "^8.21.0"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^4.1.9",
     "happy-dom": "^20.11.1",
-    "playwright": "^1.61.1",
+    "playwright": "^1.63.0",
     "typescript": "^6.0.3",
     "vite": "^8.1.5",
     "vitest": "^4.1.9"

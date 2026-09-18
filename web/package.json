@@ -17,7 +17,7 @@
     "@vitest/coverage-v8": "^4.1.9",
     "happy-dom": "^20.11.1",
     "playwright": "^1.61.1",
-    "typescript": "^6.0.3",
+    "typescript": "^7.0.2",
     "vite": "^8.1.5",
     "vitest": "^4.1.9"
   }

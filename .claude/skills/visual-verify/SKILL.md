@@ -1,6 +1,6 @@
 ---
 name: visual-verify
-description: Verify a UI/scene change in the running app with the Playwright harnesses in web/scripts — screenshots at trace positions and the 37-assertion control check. Use when asked whether a visual change works, to screenshot the scene, to check that buttons/controls still behave, or before claiming a frontend change is done.
+description: Verify a UI/scene change in the running app with the Playwright harnesses in web/scripts — screenshots at trace positions and the 38-assertion control check. Use when asked whether a visual change works, to screenshot the scene, to check that buttons/controls still behave, or before claiming a frontend change is done.
 ---
 
 # Visual verification
@@ -47,11 +47,11 @@ clean screenshot with a non-empty error list is a **failed** verification.
 ## 3. Control contract
 
 ```bash
-node web/scripts/verify-controls.mjs      # expects 37/37
+node web/scripts/verify-controls.mjs      # expects 38/38
 ```
 
 Exercises every button/affordance and asserts the resulting player and timeline
-state. Anything below 37/37 is a regression — report which assertion failed, do
+state. Anything below 38/38 is a regression — report which assertion failed, do
 not re-run hoping for a different number. On a slow machine stretch the budget
 with `CONTRACT_TIMEOUT_SCALE=2` rather than editing the waits.
 

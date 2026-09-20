@@ -58,7 +58,7 @@ internal/tracerun  ──►  internal/traceparse  ──►  internal/timeline 
 
 - The trace is captured in a **separate subprocess** — the server's own goroutines never pollute it, and `GOMAXPROCS` is set per run.
 - Scenarios pace themselves with CPU work (`busyFor`), never `time.Sleep` — sleeping parks goroutines and empties the world; unpaced channel scenarios generate millions of events.
-- Pure logic (state folding, GC summary, layout, causality log, viewport math, i18n) is unit-tested; the visual layer is verified by Playwright harnesses, including a 37-point control contract.
+- Pure logic (state folding, GC summary, layout, causality log, viewport math, i18n) is unit-tested; the visual layer is verified by Playwright harnesses, including a 38-point control contract.
 
 For package boundaries, the `mid` binding rules, what is real versus reconstructed, and the traps that shaped the design, see **[docs/architecture.md](docs/architecture.md)**.
 
@@ -96,7 +96,7 @@ The same pipeline deploys to GitHub Pages on every push to `main` (`.github/work
 ```bash
 go test ./...                     # scheduler invariants incl. M bindings, scenario anti-regressions
 cd web && npx vitest run          # pure logic: state, GC, layout, causality, share codec, viewport, i18n
-node scripts/verify-controls.mjs  # Playwright: 37-point control contract (needs both servers running)
+node scripts/verify-controls.mjs  # Playwright: 38-point control contract (needs both servers running)
 ```
 
 > The backend compiles and runs the workload on demand (`go run`), so it needs the Go toolchain and this module's source at runtime. It is a local teaching tool — **do not expose the dev server publicly.**

@@ -41,7 +41,7 @@ make hooks   # once per clone: enable the pre-commit gate
 ```
 
 CI runs the same plus a Vite build and the Playwright control contract
-(37/37). Screenshots and that contract live in `web/scripts/` and are driven by
+(38/38). Screenshots and that contract live in `web/scripts/` and are driven by
 the **visual-verify** skill — use it before claiming a scene or control change
 works.
 
@@ -49,9 +49,10 @@ works.
 
 - In `web/src/ui/chrome.ts` the i18n helper is imported as `tr`, because
   `update()` already has a local `const t`.
-- `internal/traceparse/testdata/workstealing.trace` is a binary recording of a
-  real run and still contains the old module name. It is data, not source — do
-  not edit it.
+- `internal/traceparse/testdata/workstealing.trace` and
+  `web/scripts/testdata/upload.trace` are binary recordings of real runs (the
+  first still contains the old module name). They are data, not source — do not
+  edit them.
 - All pixel art is drawn procedurally in `web/src/scene/`; there are no external
   asset files to look for.
 - User-facing strings never appear inline — they go through `t()` in

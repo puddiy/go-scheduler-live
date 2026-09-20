@@ -1,6 +1,7 @@
 // Control-verification harness: exercises every button/affordance and asserts the
 // resulting player/timeline state, so "all buttons work" has concrete evidence.
 import { chromium } from 'playwright'
+import { fileURLToPath } from 'node:url'
 
 const url = process.env.SHOOT_URL ?? 'http://localhost:5173'
 const outDir = process.env.SHOOT_OUT ?? '/tmp'
@@ -254,6 +255,28 @@ await page.keyboard.press('Escape')
 await page.waitForTimeout(150)
 ok('present mode: Escape clears body.present', !(await page.evaluate(() => document.body.classList.contains('present'))))
 ok('present mode: controls visible again', await page.locator('.controls').isVisible())
+
+// 13. Custom-trace upload, end to end. Check 8a only opened the panel; this
+// one feeds a real recording through the same <input type=file> the file
+// picker fills, so the parse → Timeline → replay path is what gets asserted.
+// It runs last on purpose: the uploaded trace replaces the scenario, and
+// "Запустить" means nothing while a custom trace is loaded.
+// testdata/upload.trace is a real recording (20 CPU-bound goroutines handing
+// results over a channel, GOMAXPROCS=4, go1.26.2) — data, not source.
+const fixture = fileURLToPath(new URL('./testdata/upload.trace', import.meta.url))
+await page.locator('.chip[data-id="custom"]').click()
+await page.locator('.upload-panel input[type=file]').setInputFiles(fixture)
+// The upload posts to a real backend, which parses the trace: allow for a
+// cold CI runner rather than a warm dev machine.
+await page
+  .waitForFunction(() => globalThis.gmp.timeline?.meta?.scenario === 'custom', { timeout: ms(25000) })
+  .catch(() => {})
+const uploaded = await state()
+ok(
+  'uploaded .trace replays as a custom timeline',
+  uploaded.scenario === 'custom' && uploaded.numProcs === 4 && uploaded.duration > 0,
+  `scenario=${uploaded.scenario} procs=${uploaded.numProcs} duration=${Math.round(uploaded.duration)}`,
+)
 
 console.log('\n=== CONTROL VERIFICATION ===')
 for (const r of results) console.log(`${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.detail ? '  [' + r.detail + ']' : ''}`)

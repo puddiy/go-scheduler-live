@@ -1,7 +1,11 @@
 package traceparse
 
 import (
+	"bytes"
+	"io"
 	"os"
+	"reflect"
+	"strings"
 	"testing"
 
 	exptrace "golang.org/x/exp/trace"
@@ -110,8 +114,8 @@ func TestParseAndBuildReal(t *testing.T) {
 	}
 	t.Logf("real trace: events=%d goroutines=%d stolenRunStarts=%d",
 		len(tl.Events), len(tl.Meta.Goroutines), stolen)
-	if stolen == 0 {
-		t.Error("expected reconstructed steals on a 50-goroutine / 4-P trace, got 0")
+	if stolen != 0 {
+		t.Error("ordinary trace must never claim work stealing")
 	}
 }
 
@@ -123,8 +127,13 @@ func TestGoEventType(t *testing.T) {
 		wantOK   bool
 	}{
 		{"create", exptrace.GoNotExist, exptrace.GoRunnable, timeline.EventGCreate, true},
+		{"create blocked", exptrace.GoNotExist, exptrace.GoWaiting, timeline.EventGCreate, true},
+		{"create in syscall", exptrace.GoNotExist, exptrace.GoSyscall, timeline.EventGCreate, true},
 		{"run start", exptrace.GoRunnable, exptrace.GoRunning, timeline.EventGRunStart, true},
-		{"run start from undetermined", exptrace.GoUndetermined, exptrace.GoRunning, timeline.EventGRunStart, true},
+		{"run start from undetermined", exptrace.GoUndetermined, exptrace.GoRunning, timeline.EventType("g_status"), true},
+		{"initial runnable", exptrace.GoUndetermined, exptrace.GoRunnable, timeline.EventType("g_status"), true},
+		{"initial waiting", exptrace.GoUndetermined, exptrace.GoWaiting, timeline.EventType("g_status"), true},
+		{"initial syscall", exptrace.GoUndetermined, exptrace.GoSyscall, timeline.EventType("g_status"), true},
 		{"syscall enter", exptrace.GoRunning, exptrace.GoSyscall, timeline.EventGSyscallEnter, true},
 		{"syscall exit", exptrace.GoSyscall, exptrace.GoRunning, timeline.EventGSyscallExit, true},
 		{"block", exptrace.GoRunning, exptrace.GoWaiting, timeline.EventGBlock, true},
@@ -155,7 +164,9 @@ func TestProcEventType(t *testing.T) {
 		{"start", exptrace.ProcIdle, exptrace.ProcRunning, timeline.EventPStart, true},
 		{"start from undetermined", exptrace.ProcUndetermined, exptrace.ProcRunning, timeline.EventPStart, true},
 		{"stop", exptrace.ProcRunning, exptrace.ProcIdle, timeline.EventPStop, true},
-		{"undetermined to idle ignored", exptrace.ProcUndetermined, exptrace.ProcIdle, "", false},
+		{"new idle proc", exptrace.ProcNotExist, exptrace.ProcIdle, timeline.EventPStop, true},
+		{"initial idle", exptrace.ProcUndetermined, exptrace.ProcIdle, timeline.EventPStop, true},
+		{"unchanged proc", exptrace.ProcRunning, exptrace.ProcRunning, "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -165,5 +176,71 @@ func TestProcEventType(t *testing.T) {
 					tt.from, tt.to, gotType, gotOK, tt.wantType, tt.wantOK)
 			}
 		})
+	}
+}
+
+func TestParsePreservesInitialStatesAndSchedulerMetrics(t *testing.T) {
+	raw, err := os.ReadFile("testdata/workstealing.trace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := exptrace.NewReader(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshots := map[int64]string{}
+	var procs []uint64
+	var first, last exptrace.Time
+	haveFirst := false
+	for {
+		e, err := reader.ReadEvent()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !haveFirst {
+			first = e.Time()
+			haveFirst = true
+		}
+		last = e.Time()
+		if e.Kind() == exptrace.EventMetric && e.Metric().Name == metricGOMAXPROCS {
+			procs = append(procs, e.Metric().Value.Uint64())
+		}
+		if e.Kind() != exptrace.EventStateTransition {
+			continue
+		}
+		st := e.StateTransition()
+		if st.Resource.Kind != exptrace.ResourceGoroutine {
+			continue
+		}
+		from, to := st.Goroutine()
+		if from == exptrace.GoUndetermined {
+			snapshots[int64(st.Resource.Goroutine())] = strings.ToLower(to.String())
+		}
+	}
+	events, err := Parse(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[int64]string{}
+	var gotProcs []uint64
+	for _, e := range events {
+		if e.Type == timeline.EventGStatus {
+			seen[e.GID] = e.State
+		}
+		if e.Type == timeline.EventMetric && e.Name == metricGOMAXPROCS {
+			gotProcs = append(gotProcs, e.Value)
+		}
+	}
+	if !reflect.DeepEqual(seen, snapshots) {
+		t.Fatalf("snapshots = %v, want raw %v", seen, snapshots)
+	}
+	if !reflect.DeepEqual(gotProcs, procs) {
+		t.Fatalf("GOMAXPROCS = %v, want raw %v", gotProcs, procs)
+	}
+	if events[len(events)-1].T != int64(last.Sub(first)) {
+		t.Fatal("filtered events truncated the recording duration")
 	}
 }

@@ -19,7 +19,7 @@ export function bucketCounts(events: TimelineEvent[], buckets: number, durationN
   const out = new Array<number>(n).fill(0)
   if (durationNs <= 0) return out
   for (const e of events) {
-    if (e.type === 'metric') continue
+    if (e.type === 'metric' || e.type === 'trace_end') continue
     out[bucketOfTime(e.t, n, durationNs)]++
   }
   return out

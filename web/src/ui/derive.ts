@@ -24,12 +24,12 @@ export function gcPhase(world: WorldState): GcPhase {
   return { kind: 'idle', label: t().gcPhase.idle, color: PAL.gcIdle }
 }
 
-// heapPct is the live-heap fraction of the GC goal, clamped to [0,1], or null
+// heapPct is the allocated-objects fraction of the soft GC goal, including overshoot, or null
 // when the trace carries no heap metrics yet (the bar then reads empty).
 export function heapPct(world: WorldState): number | null {
   const { heapLive, heapGoal } = world
   if (heapLive === undefined || heapGoal === undefined || heapGoal <= 0) return null
-  return Math.max(0, Math.min(1, heapLive / heapGoal))
+  return Math.max(0, heapLive / heapGoal)
 }
 
 export interface WaitGroup {
@@ -47,4 +47,11 @@ export function waitingBreakdown(world: WorldState): WaitGroup[] {
     counts.set(c, (counts.get(c) ?? 0) + 1)
   }
   return REASON_CATEGORIES.filter((c) => counts.has(c)).map((c) => ({ category: c, count: counts.get(c)! }))
+}
+
+/** Counts include every observed G, independently of scene render caps. */
+export function schedulerCounts(world: WorldState): Record<'running' | 'runnable' | 'waiting' | 'syscall', number> {
+  const counts = { running: 0, runnable: 0, waiting: 0, syscall: 0 }
+  for (const g of world.goroutines.values()) if (g.state !== 'dead') counts[g.state]++
+  return counts
 }

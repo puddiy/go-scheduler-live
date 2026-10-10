@@ -2,19 +2,9 @@ import type { WorldState } from '../player/state'
 import type { TimelineEvent } from '../model/timeline'
 import { stationPositions, type Pt } from './iso'
 
-// placeIso maps each live goroutine to a position+scale in the base (576x330)
-// world, following the handoff composition: running gophers stand on their P
-// station (full scale), runnable ones queue in a P's local lane, waiting/syscall
-// cluster in their bottom zones (rendered smaller so a crowd stays legible). Pure
-// → unit-tested.
-//
-// Local run-queue membership is NOT in the trace (the runnable's `pid` is just the
-// last P that touched it, which clusters everything on the spawn-P), so we
-// reconstruct a stable, balanced layout: a goroutine's home P is `gid % numProcs`.
-// Once a P's local lane is full (CAPS.local) the surplus spills into the global
-// queue — which mirrors the real runtime overflowing a full local runq to the
-// global one. Anything past CAPS.global is counted and shown as a "+N" pill. This
-// reconstruction is labeled as such in the chrome legend.
+// Spatial layout encodes observed G states and own-execution P/M bindings.
+// Runnable Gs share an unassigned pool: runtime/trace exposes neither queue
+// membership nor steals. Render caps only hide sprites; counters retain all Gs.
 
 export interface Rect {
   x: number
@@ -34,13 +24,12 @@ export const WAITING: Rect = { x: 196, y: 232, w: 156, h: 90 }
 export const SYSCALL: Rect = { x: 402, y: 232, w: 150, h: 90 }
 
 // Per-zone render caps. Surplus goroutines are counted, not placed (see zoneTotals).
-export const CAPS = { local: 6, global: 18, waiting: 18, syscall: 14 } as const
+export const CAPS = { global: 18, waiting: 18, syscall: 14 } as const
 
 // Sprite scales by role. Crowded zones shrink so neighbours don't overlap into a
 // blob (the sprite footprint is ~48x52; zone spacing below is sized to the scaled
 // footprint).
 const RUN_SCALE = 1
-const LOCAL_SCALE = 0.82
 const ZONE_SCALE = 0.55
 
 const PACK_DX = 20
@@ -54,48 +43,26 @@ function packStagger(r: Rect, i: number): Pt {
   const col = i % cols
   return {
     x: r.x + 12 + col * PACK_DX + (row % 2) * (PACK_DX / 2),
-    y: r.y + 14 + row * PACK_DY,
+    y: r.y + 26 + row * PACK_DY,
   }
 }
 
-// localPos stacks a P's local run-queue toward the viewer (below the platform),
-// two abreast with a half-step stagger per row.
-function localPos(st: Pt, i: number): Pt {
-  const col = i % 2
-  const row = Math.floor(i / 2)
-  return { x: st.x - 7 + col * 14 + (row % 2) * 7, y: st.y + 38 + row * 12 }
-}
-
 export interface ZoneTotals {
-  /** runnables homed to each P local queue (index = pid), uncapped. */
-  local: number[]
-  /** runnables spilled to the global queue (local lanes full). */
+  /** All observed runnable Gs, regardless of unknown queue membership. */
   global: number
   waiting: number
   syscall: number
 }
 
-// homeP is the reconstructed local-queue owner of a runnable goroutine: a stable,
-// balanced assignment independent of the unreliable last-touched `pid`.
-function homeP(gid: number, numProcs: number): number {
-  return ((gid % numProcs) + numProcs) % numProcs
-}
-
-// zoneTotals counts goroutines per zone the same way placeIso buckets them, so the
-// chrome can show how many are hidden beyond the render caps. Pure.
-export function zoneTotals(world: WorldState, numProcs: number): ZoneTotals {
-  const homed = Array.from({ length: numProcs }, () => 0)
-  let waiting = 0
-  let syscall = 0
+// Counts cover all observed Gs, including sprites hidden by the render caps.
+export function zoneTotals(world: WorldState): ZoneTotals {
+  let global = 0, waiting = 0, syscall = 0
   for (const v of world.goroutines.values()) {
-    if (v.state === 'waiting') waiting++
+    if (v.state === 'runnable') global++
+    else if (v.state === 'waiting') waiting++
     else if (v.state === 'syscall') syscall++
-    else if (v.state === 'runnable') homed[homeP(v.gid, numProcs)]++
   }
-  // Drawn in each P's lane is capped; the surplus spills to the global queue.
-  const local = homed.map((n) => Math.min(n, CAPS.local))
-  const global = homed.reduce((s, n) => s + Math.max(0, n - CAPS.local), 0)
-  return { local, global, waiting, syscall }
+  return { global, waiting, syscall }
 }
 
 // midAliases maps every real thread id in the trace to a small display ordinal
@@ -152,7 +119,6 @@ export function placeThreads(
 export function placeIso(world: WorldState, numProcs: number): Map<number, Placement> {
   const out = new Map<number, Placement>()
   const stations = stationPositions(numProcs)
-  const localN = stations.map(() => 0)
   let globalN = 0
   let waitN = 0
   let sysN = 0
@@ -163,7 +129,8 @@ export function placeIso(world: WorldState, numProcs: number): Map<number, Place
     switch (v.state) {
       case 'running': {
         const onP = v.pid >= 0 && v.pid < stations.length
-        const st = onP ? stations[v.pid] : stations[0]
+        if (!onP) break // Never invent an execution P for an unknown binding.
+        const st = stations[v.pid]
         out.set(gid, { x: st.x, y: st.y, scale: RUN_SCALE })
         break
       }
@@ -175,18 +142,10 @@ export function placeIso(world: WorldState, numProcs: number): Map<number, Place
         if (waitN < CAPS.waiting) out.set(gid, { ...packStagger(WAITING, waitN), scale: ZONE_SCALE })
         waitN++
         break
-      case 'runnable': {
-        const p = homeP(gid, stations.length)
-        if (localN[p] < CAPS.local) {
-          out.set(gid, { ...localPos(stations[p], localN[p]), scale: LOCAL_SCALE })
-          localN[p]++
-        } else if (globalN < CAPS.global) {
-          // local runq full → spill to the global queue (real runtime behaviour).
-          out.set(gid, { ...packStagger(GLOBAL, globalN), scale: ZONE_SCALE })
-          globalN++
-        }
+      case 'runnable':
+        if (globalN < CAPS.global) out.set(gid, { ...packStagger(GLOBAL, globalN), scale: ZONE_SCALE })
+        globalN++
         break
-      }
       case 'dead':
         break
     }

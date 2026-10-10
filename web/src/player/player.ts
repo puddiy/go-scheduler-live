@@ -3,10 +3,7 @@ import { stateAt, type WorldState } from './state'
 
 // At speed 1 the whole run plays over this many ms of real time, regardless of
 // its absolute (tiny) trace duration — otherwise a ~66ms trace would flash by.
-// 90s (was 45s): dense scenarios (pingpong/syscalls, ~2k events) averaged ~40
-// state changes per second — shorter than the sprites' travel easing, so
-// gophers never visibly arrived anywhere. At 90s a state lasts longer than the
-// journey; 2× restores the old pace for anyone who wants it.
+// Playback expands time for inspection; locations still change at event times.
 const BASE_WALL_MS = 90_000
 
 export function clamp(v: number, lo: number, hi: number): number {
@@ -57,11 +54,13 @@ export class Player {
   }
 
   pause(): void {
+    const wasPlaying = this._playing
     this._playing = false
     if (this.raf) {
       cancelAnimationFrame(this.raf)
       this.raf = 0
     }
+    if (wasPlaying) this.emit()
   }
 
   toggle(): void {
@@ -86,6 +85,18 @@ export class Player {
     this.seek(next ? next.t : this.duration)
   }
 
+  stepBack(): void {
+    this.pause()
+    // All events at one timestamp form one observable snapshot.
+    for (let i = this.timeline.events.length - 1; i >= 0; i--) {
+      if (this.timeline.events[i].t < this._t) {
+        this.seek(this.timeline.events[i].t)
+        return
+      }
+    }
+    this.seek(0)
+  }
+
   // emit recomputes the world at the current time and pushes it to the listener.
   emit(): void {
     this.onTick?.(stateAt(this.timeline, this._t))
@@ -100,7 +111,6 @@ export class Player {
       // Pause first, then emit, so listeners (the play button label) see the
       // paused state at the end of playback.
       this.pause()
-      this.emit()
       return
     }
     this.emit()

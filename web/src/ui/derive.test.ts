@@ -34,7 +34,7 @@ describe('gcPhase', () => {
   it('is stw when stop-the-world is active (priority over mark)', () => {
     const p = gcPhase(world({ gcActive: ['mark phase', 'stop-the-world'] }))
     expect(p.kind).toBe('stw')
-    expect(p.label).toBe('GC: stop-the-world')
+    expect(p.label).toBe('STW · runtime')
     expect(p.color).toBe(PAL.gcStw)
   })
 })
@@ -50,8 +50,8 @@ describe('heapPct', () => {
     expect(heapPct(world({ heapLive: 40, heapGoal: 100 }))).toBeCloseTo(0.4)
   })
 
-  it('clamps to [0,1]', () => {
-    expect(heapPct(world({ heapLive: 250, heapGoal: 100 }))).toBe(1)
+  it('preserves a heap overshoot above the soft GC goal', () => {
+    expect(heapPct(world({ heapLive: 250, heapGoal: 100 }))).toBe(2.5)
     expect(heapPct(world({ heapLive: -5, heapGoal: 100 }))).toBe(0)
   })
 
@@ -77,4 +77,12 @@ describe('waitingBreakdown', () => {
   it('ignores non-waiting goroutines', () => {
     expect(waitingBreakdown(waiters(['chan receive']))).toEqual([{ category: 'канал', count: 1 }])
   })
+})
+
+it('counts all observed live states including those beyond render caps', async () => {
+  const { schedulerCounts } = await import('./derive')
+  const gs = new Map<number, GoroutineView>()
+  for (let gid = 0; gid < 60; gid++) gs.set(gid, { gid, state: 'runnable', pid: -1, mid: -1, stolen: false })
+  gs.set(70, { gid: 70, state: 'dead', pid: -1, mid: -1, stolen: false })
+  expect(schedulerCounts(world({ goroutines: gs }))).toEqual({ running: 0, runnable: 60, waiting: 0, syscall: 0 })
 })

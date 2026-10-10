@@ -8,6 +8,9 @@ package timeline
 type EventType string
 
 const (
+	EventGStatus       EventType = "g_status"
+	EventGCRangeActive EventType = "gc_range_active"
+	EventTraceEnd      EventType = "trace_end"
 	EventGCreate       EventType = "g_create"
 	EventGRunStart     EventType = "g_run_start"
 	EventGRunStop      EventType = "g_run_stop"
@@ -36,15 +39,18 @@ const NoResource int64 = -1
 // by a steal it is the stealer's M. Consumers must bind an M to a G/P only on
 // own-execution events (g_run_start, g_syscall_enter/exit, p_start).
 type Event struct {
-	T      int64     `json:"t"`    // ns since the first trace event
-	Type   EventType `json:"type"` //
-	GID    int64     `json:"gid"`  // goroutine id, or NoResource
-	PID    int64     `json:"pid"`  // proc id, or NoResource
-	MID    int64     `json:"mid"`  // executing OS-thread id, or NoResource
-	Reason string    `json:"reason,omitempty"`
-	Name   string    `json:"name,omitempty"`  // range / metric name
-	Value  uint64    `json:"value,omitempty"` // metric value
-	Stolen bool      `json:"stolen,omitempty"`
+	T        int64     `json:"t"`                  // ns since the first trace event
+	Type     EventType `json:"type"`               //
+	GID      int64     `json:"gid"`                // goroutine id, or NoResource
+	PID      int64     `json:"pid"`                // proc id, or NoResource
+	MID      int64     `json:"mid"`                // executing OS-thread id, or NoResource
+	ActorGID *int64    `json:"actorGid,omitempty"` // executing G for create/unblock; -1 means unknown
+	State    string    `json:"state,omitempty"`    // g_status or non-runnable create: observed G state
+	Initial  bool      `json:"initial,omitempty"`  // first observed resource state, not an acquisition
+	Reason   string    `json:"reason,omitempty"`
+	Name     string    `json:"name,omitempty"` // range / metric name
+	Value    uint64    `json:"value"`          // metric value
+	Stolen   bool      `json:"stolen,omitempty"`
 }
 
 // Meta describes the run as a whole.

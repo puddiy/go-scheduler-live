@@ -1,16 +1,15 @@
 import type { Timeline, TimelineEvent } from '../model/timeline'
 import { gcSummary, type GcSummary } from '../player/gc'
-import { stealMarks, STEAL_LOOKBACK_NS, type StealMark } from '../player/steal'
 import { eventDensity, timeOfFrac } from './histogram'
 import { PAL } from '../scene/palette'
 import { t as tr } from '../i18n'
 
 // TimelineBar is the unified control-panel timeline: one canvas drawing, to-scale
 // over the whole run, an event-density histogram + concurrent-mark bands + STW ticks
-// + steal diamonds + a playhead — with click/drag to seek. It replaces the DOM
+// + a playhead — with click/drag to seek. It replaces the DOM
 // GC-strip and the visible range scrubber (the native range input stays in the DOM,
 // visually hidden, for keyboard + the control harness). All inputs are REAL trace
-// data (only the steal marks are the reconstructed heuristic, disclosed elsewhere).
+// data; no queue or work-stealing heuristic is drawn.
 //
 // The static layers (grid + histogram + bands + ticks + diamonds) are baked once per
 // run into an offscreen canvas; render() only blits that and draws the moving
@@ -32,7 +31,6 @@ export class TimelineBar {
   private events: TimelineEvent[] = []
   private durationNs = 0
   private gc: GcSummary = { cycles: 0, stw: [], mark: [], maxStwNs: 0 }
-  private steals: StealMark[] = []
 
   private cssW = 0
   private dpr = 1
@@ -56,7 +54,6 @@ export class TimelineBar {
     legend.append(
       swatch('mark', S.timeline.mark),
       swatch('stw', S.timeline.stw),
-      swatch('steal', S.timeline.steal),
       swatch('density', S.timeline.density),
     )
     this.root.append(legend)
@@ -89,7 +86,6 @@ export class TimelineBar {
     this.events = tl.events
     this.durationNs = tl.meta.durationNs
     this.gc = gcSummary(tl)
-    this.steals = stealMarks(tl.events, STEAL_LOOKBACK_NS)
     this.tNs = 0
     this.resize()
   }
@@ -103,7 +99,7 @@ export class TimelineBar {
   // resize matches the backing store to the element width (× dpr for crisp ticks),
   // rebakes the background, and repaints.
   private resize(): void {
-    const w = Math.max(0, Math.floor(this.root.clientWidth))
+    const w = Math.max(0, Math.floor(this.canvas.clientWidth))
     if (w <= 0) return
     this.cssW = w
     this.dpr = window.devicePixelRatio || 1
@@ -178,19 +174,6 @@ export class TimelineBar {
       g.fillRect(Math.round(this.xOf(s.startNs)), 2, 2, h - 6)
     }
 
-    // steal diamonds (reconstructed bursts)
-    for (const s of this.steals) {
-      const x = this.xOf(s.tNs)
-      g.save()
-      g.translate(x, 9)
-      g.rotate(Math.PI / 4)
-      g.fillStyle = PAL.gcStw
-      g.fillRect(-3.5, -3.5, 7, 7)
-      g.fillStyle = '#fff'
-      g.fillRect(-1, -1, 2, 2)
-      g.restore()
-    }
-
     this.bg = bg
   }
 
@@ -217,8 +200,8 @@ export class TimelineBar {
   private seekFromClientX(clientX: number): void {
     if (this.durationNs <= 0) return
     const r = this.canvas.getBoundingClientRect()
-    const inner = r.width - 2 * INSET
-    const frac = inner > 0 ? (clientX - r.left - INSET) / inner : 0
+    const inner = this.cssW - 2 * INSET
+    const frac = inner > 0 ? (clientX - r.left - this.canvas.clientLeft - INSET) / inner : 0
     this.onSeek?.(timeOfFrac(frac, this.durationNs))
   }
 }

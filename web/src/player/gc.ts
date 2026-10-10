@@ -1,16 +1,13 @@
 import type { Timeline } from '../model/timeline'
 
-// gcSummary reduces a Timeline's GC ranges into the cycle/STW/mark intervals the
-// chrome needs to surface REAL GC behavior. The trace records two short
-// stop-the-world pauses per cycle (sweep-termination, mark-termination) bracketing
-// a long concurrent-mark phase, plus a "start trace" STW. At the 45s-normalized
-// playback those STW pauses are sub-frame, so the per-frame state misses them —
-// this summary (computed once) lets the UI show the GC strip, a cycle counter and
-// the real longest-STW duration honestly, at true wall-time proportion. Pure.
+// Summarize recorded mark phases and runtime STW ranges without inferring
+// missing boundaries, GC cycle completion, or a global freeze.
 
 export interface Interval {
   startNs: number
   endNs: number
+  /** The phase started before, or ends after, the recording. */
+  partial?: boolean
 }
 
 export interface StwInterval extends Interval {
@@ -18,7 +15,7 @@ export interface StwInterval extends Interval {
 }
 
 export interface GcSummary {
-  /** number of GC cycles (one concurrent-mark phase each). */
+  /** Number of fully recorded concurrent-mark phases. */
   cycles: number
   /** stop-the-world pauses, paired begin→end, in trace-time order. */
   stw: StwInterval[]
@@ -45,26 +42,31 @@ export const STW_FLASH_MS = 320
 // gcSummary pairs each gc_range_begin with its matching gc_range_end (by name,
 // LIFO) and buckets the closed intervals into STW vs concurrent-mark.
 export function gcSummary(timeline: Timeline): GcSummary {
-  const open = new Map<string, number[]>() // name -> stack of begin times
+  const open = new Map<string, { start: number; partial: boolean }>()
   const stw: StwInterval[] = []
   const mark: Interval[] = []
-
   for (const e of timeline.events) {
-    if (e.type === 'gc_range_begin' && e.name) {
-      const stack = open.get(e.name) ?? []
-      stack.push(e.t)
-      open.set(e.name, stack)
-    } else if (e.type === 'gc_range_end' && e.name) {
-      const stack = open.get(e.name)
-      const start = stack?.pop()
-      if (start === undefined) continue
-      if (isStw(e.name)) stw.push({ startNs: start, endNs: e.t, ns: e.t - start })
-      else if (isMark(e.name)) mark.push({ startNs: start, endNs: e.t })
+    if (!e.name) continue
+    if (e.type === 'gc_range_begin' || e.type === 'gc_range_active') {
+      if (!open.has(e.name)) open.set(e.name, { start: e.t, partial: e.type === 'gc_range_active' })
+    } else if (e.type === 'gc_range_end') {
+      const interval = open.get(e.name)
+      if (!interval) continue
+      open.delete(e.name)
+      const iv: Interval = { startNs: interval.start, endNs: e.t }
+      if (interval.partial) iv.partial = true
+      if (isStw(e.name) && !interval.partial) stw.push({ ...iv, ns: e.t - interval.start })
+      else if (isMark(e.name)) mark.push(iv)
     }
+  }
+  // A phase that outlives the recording is visible up to its end; never invent
+  // its completion time or count it as a complete phase.
+  for (const [name, interval] of open) {
+    if (isMark(name)) mark.push({ startNs: interval.start, endNs: timeline.meta.durationNs, partial: true })
   }
 
   const maxStwNs = stw.reduce((m, s) => Math.max(m, s.ns), 0)
-  return { cycles: mark.length, stw, mark, maxStwNs }
+  return { cycles: mark.filter(iv => !iv.partial).length, stw, mark, maxStwNs }
 }
 
 // stwInWindow returns the STW pause overlapping the half-open step window (t0, t1]
@@ -87,7 +89,7 @@ export function stwInWindow(s: GcSummary, t0: number, t1: number): StwInterval |
 export const STEP_WINDOW_PCT = 0.03
 
 // isPlaybackStep reports whether (lastT, t] is one forward playback step, so the
-// in-world GC/steal cues fire during play but not when scrubbing. Shared by the
+// in-world STW cues fire during play but not when scrubbing. Shared by the
 // scene (vignette) and the chrome (banner) so both detect the same window.
 export function isPlaybackStep(lastT: number, t: number, durationNs: number): boolean {
   return lastT >= 0 && t > lastT && t - lastT < Math.max(1, durationNs * STEP_WINDOW_PCT)

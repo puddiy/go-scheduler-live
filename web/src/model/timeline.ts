@@ -2,6 +2,9 @@
 // backend's JSON contract.
 
 export type EventType =
+  | 'g_status'
+  | 'gc_range_active'
+  | 'trace_end'
   | 'g_create'
   | 'g_run_start'
   | 'g_run_stop'
@@ -32,6 +35,10 @@ export interface TimelineEvent {
    * Bind an M to a G/P only on own-execution events — see stateAt.
    */
   mid: number
+  /** Executing G context for create/unblock; -1 means absent, undefined is legacy. */
+  actorGid?: number
+  state?: 'runnable' | 'running' | 'waiting' | 'syscall' | 'dead'
+  initial?: boolean
   reason?: string
   name?: string
   value?: number

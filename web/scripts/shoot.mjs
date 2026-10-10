@@ -35,7 +35,7 @@ for (const f of fractions) {
     p.pause()
     p.seek(p.duration * frac)
   }, f)
-  await page.waitForTimeout(delay) // let sprites ease in and steal flashes show
+  await page.waitForTimeout(delay) // allow the canvas renderer to paint
   const path = `${outDir}/shoot-${Math.round(f * 100)}.png`
   await page.screenshot({ path })
   console.log('wrote', path)
@@ -43,3 +43,4 @@ for (const f of fractions) {
 
 console.log('console errors:', errors.length ? errors : 'none')
 await browser.close()
+process.exitCode = errors.length ? 1 : 0

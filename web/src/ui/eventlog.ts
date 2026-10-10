@@ -50,6 +50,7 @@ interface GCtx {
   since: number
   created?: number
   reason?: string
+  partial?: boolean
   via?: RunnableVia
   wakerGid?: number
 }
@@ -60,9 +61,9 @@ interface GCtx {
 //  - who woke/created a goroutine: the event's mid is the waker's/creator's M,
 //    and the fold knows which G was executing on that M (same executor
 //    semantics as stateAt, unblocker trap included);
-//  - how long it waited / ran / sat in the kernel: time since it entered the
+//  - how long it waited / ran / stayed in syscall: time since it entered the
 //    previous state;
-//  - a p_stop while its M is blocked in a syscall is the sysmon retake.
+//  - a p_stop releases P; the initiator and next owner are not inferred.
 // Metrics are skipped (thousands of heap samples would drown the journal).
 export function buildLogRows(events: TimelineEvent[], midAlias?: Map<number, number>): TimedLogRow[] {
   const L = t().log
@@ -73,9 +74,10 @@ export function buildLogRows(events: TimelineEvent[], midAlias?: Map<number, num
   const pOwner = new Map<number, number>() // pid -> mid
   const sysWithM = new Map<number, number>() // mid blocked in kernel -> its gid
 
-  const bind = (gid: number, mid: number): void => {
+  const bind = (gid: number, mid: number, running = true): void => {
     if (mid < 0) return
-    mBusy.set(mid, gid)
+    if (running) mBusy.set(mid, gid)
+    else mBusy.delete(mid)
     gToM.set(gid, mid)
   }
   const unbind = (gid: number): void => {
@@ -87,6 +89,7 @@ export function buildLogRows(events: TimelineEvent[], midAlias?: Map<number, num
   }
   // The G executing on the event's M — the actor behind creates/unblocks.
   const actor = (e: TimelineEvent): number | undefined => {
+    if (e.actorGid !== undefined) return e.actorGid >= 0 && e.actorGid !== e.gid ? e.actorGid : undefined
     if (e.mid < 0) return undefined
     const gid = mBusy.get(e.mid)
     return gid !== undefined && gid !== e.gid ? gid : undefined
@@ -99,12 +102,22 @@ export function buildLogRows(events: TimelineEvent[], midAlias?: Map<number, num
 
   for (const e of events) {
     const ctx = gs.get(e.gid)
-    const dur = (): string => (ctx ? fmtDur(e.t - ctx.since) : '')
+    const dur = (): string => (ctx ? `${ctx.partial ? '≥' : ''}${fmtDur(e.t - ctx.since)}` : '')
     switch (e.type) {
+      case 'g_status': {
+        if (!e.state) break
+        push(e.t, 'sched', L.snapshot(e.gid, t().scene.states[e.state]))
+        gs.set(e.gid, { state: e.state, since: e.t, partial: true })
+        if (e.state === 'running' || e.state === 'syscall') bind(e.gid, e.mid, e.state === 'running')
+        if (e.state === 'syscall' && e.mid >= 0) sysWithM.set(e.mid, e.gid)
+        if (e.state === 'running' && e.mid >= 0 && e.pid >= 0) pOwner.set(e.pid, e.mid)
+        break
+      }
       case 'g_create': {
         const by = actor(e)
         push(e.t, 'sched', L.created(e.gid, by))
-        gs.set(e.gid, { state: 'runnable', since: e.t, created: e.t, via: 'create' })
+        gs.set(e.gid, { state: e.state ?? 'runnable', since: e.t, created: e.t, via: 'create' })
+        if (e.state === 'syscall') { bind(e.gid, e.mid, false); if (e.mid >= 0) sysWithM.set(e.mid, e.gid) }
         break
       }
       case 'g_run_start': {
@@ -114,72 +127,77 @@ export function buildLogRows(events: TimelineEvent[], midAlias?: Map<number, num
           else if (ctx.via === 'sysreturn') why = L.whyAfterSyscall(dur())
           else why = L.whyWoken(dur(), ctx.via === 'unblock' ? ctx.wakerGid : undefined)
         }
-        push(e.t, 'sched', L.gotP(e.gid, e.pid, e.mid >= 0 ? m(e.mid) : null, e.stolen === true, why))
-        gs.set(e.gid, { ...ctx, state: 'running', since: e.t })
+        push(e.t, 'sched', L.gotP(e.gid, e.pid, e.mid >= 0 ? m(e.mid) : null, why))
+        gs.set(e.gid, { ...ctx, partial: false, state: 'running', since: e.t })
         bind(e.gid, e.mid)
         if (e.mid >= 0 && e.pid >= 0) pOwner.set(e.pid, e.mid)
         break
       }
       case 'g_run_stop': {
-        push(e.t, 'sched', L.offP(e.gid, e.pid, ctx?.state === 'running' ? dur() : null))
-        gs.set(e.gid, { ...ctx, state: 'runnable', since: e.t, via: 'stop', wakerGid: undefined })
+        push(e.t, 'sched', L.offP(e.gid, e.pid, ctx?.state === 'running' ? dur() : null) + (e.reason ? ` · ${e.reason}` : ''))
+        gs.set(e.gid, { ...ctx, partial: false, state: 'runnable', since: e.t, via: 'stop', wakerGid: undefined })
         unbind(e.gid)
         break
       }
       case 'g_block': {
         push(e.t, 'wait', L.blocked(e.gid, e.reason, ctx?.state === 'running' ? dur() : null))
-        gs.set(e.gid, { ...ctx, state: 'waiting', since: e.t, reason: e.reason })
+        gs.set(e.gid, { ...ctx, partial: false, state: 'waiting', since: e.t, reason: e.reason })
         unbind(e.gid)
         break
       }
       case 'g_unblock': {
         if (ctx?.state === 'syscall') {
-          // Returned from the kernel but the P is gone: runnable, not running.
-          push(e.t, 'syscall', L.sysReturnNoP(e.gid, dur()))
+          // This transition establishes Runnable, without proving why it was scheduled.
+          push(e.t, 'syscall', L.sysReturnRunnable(e.gid, dur()))
           const mid = gToM.get(e.gid)
           if (mid !== undefined) sysWithM.delete(mid)
-          gs.set(e.gid, { ...ctx, state: 'runnable', since: e.t, via: 'sysreturn', wakerGid: undefined })
+          gs.set(e.gid, { ...ctx, partial: false, state: 'runnable', since: e.t, via: 'sysreturn', wakerGid: undefined })
           unbind(e.gid)
           break
         }
         const by = actor(e)
         const inWait = ctx?.state === 'waiting'
         push(e.t, 'wait', L.woken(e.gid, by, inWait ? ctx?.reason : undefined, inWait ? dur() : null))
-        gs.set(e.gid, { ...ctx, state: 'runnable', since: e.t, via: 'unblock', wakerGid: by })
+        gs.set(e.gid, { ...ctx, partial: false, state: 'runnable', since: e.t, via: 'unblock', wakerGid: by })
         break
       }
       case 'g_syscall_enter': {
         push(e.t, 'syscall', L.sysEnter(e.gid, e.mid >= 0 ? m(e.mid) : null))
-        gs.set(e.gid, { ...ctx, state: 'syscall', since: e.t })
-        bind(e.gid, e.mid)
+        gs.set(e.gid, { ...ctx, partial: false, state: 'syscall', since: e.t })
+        bind(e.gid, e.mid, false)
         if (e.mid >= 0) sysWithM.set(e.mid, e.gid)
         break
       }
       case 'g_syscall_exit': {
         push(e.t, 'syscall', L.sysExit(e.gid, e.pid, ctx?.state === 'syscall' ? dur() : null))
         if (e.mid >= 0) sysWithM.delete(e.mid)
-        gs.set(e.gid, { ...ctx, state: 'running', since: e.t })
+        gs.set(e.gid, { ...ctx, partial: false, state: 'running', since: e.t })
         bind(e.gid, e.mid)
         if (e.mid >= 0 && e.pid >= 0) pOwner.set(e.pid, e.mid)
         break
       }
       case 'g_exit': {
+        const mid = gToM.get(e.gid)
+        if (mid !== undefined && sysWithM.get(mid) === e.gid) sysWithM.delete(mid)
         push(e.t, 'sched', L.exited(e.gid, ctx?.created !== undefined ? fmtDur(e.t - ctx.created) : null))
-        gs.set(e.gid, { ...ctx, state: 'dead', since: e.t })
+        gs.set(e.gid, { ...ctx, partial: false, state: 'dead', since: e.t })
         unbind(e.gid)
         break
       }
       case 'p_start':
-        push(e.t, 'proc', L.pStart(e.pid, e.mid >= 0 ? m(e.mid) : null))
+        push(e.t, 'proc', e.initial ? L.pSnapshot(e.pid, 'running') : L.pStart(e.pid, e.mid >= 0 ? m(e.mid) : null))
         if (e.mid >= 0) pOwner.set(e.pid, e.mid)
         break
       case 'p_stop': {
         const owner = pOwner.get(e.pid)
         const stuckG = owner !== undefined ? sysWithM.get(owner) : undefined
-        push(e.t, 'proc', stuckG !== undefined ? L.pStopRetake(e.pid, m(owner!), stuckG) : L.pStop(e.pid))
+        push(e.t, 'proc', e.initial ? L.pSnapshot(e.pid, 'idle') : stuckG !== undefined ? L.pStopRetake(e.pid, m(owner!), stuckG) : L.pStop(e.pid))
         pOwner.delete(e.pid)
         break
       }
+      case 'gc_range_active':
+        push(e.t, 'gc', L.gcActive(e.name ?? '?'))
+        break
       case 'gc_range_begin':
         push(e.t, 'gc', L.gcBegin(e.name ?? '?'))
         break
@@ -187,6 +205,7 @@ export function buildLogRows(events: TimelineEvent[], midAlias?: Map<number, num
         push(e.t, 'gc', L.gcEnd(e.name ?? '?'))
         break
       case 'metric':
+        if (e.name === '/sched/gomaxprocs:threads') push(e.t, 'proc', `GOMAXPROCS = ${e.value}`)
         break
     }
   }

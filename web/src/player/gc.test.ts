@@ -101,3 +101,19 @@ describe('isPlaybackStep', () => {
     expect(isPlaybackStep(0, dur * 0.5, dur)).toBe(false)
   })
 })
+
+
+it('draws a mark phase crossing the trace boundary without counting it as a full phase', () => {
+  const timeline: Timeline = {
+    meta: { scenario: 'custom', numProcs: 1, durationNs: 100, goroutines: [] },
+    events: [
+      { t: 0, type: 'gc_range_active', gid: -1, pid: -1, mid: -1, name: 'GC concurrent mark phase' },
+      { t: 70, type: 'gc_range_end', gid: -1, pid: -1, mid: -1, name: 'GC concurrent mark phase' },
+    ],
+  }
+  const s = gcSummary(timeline)
+  expect(s.mark).toHaveLength(1)
+  expect(s.mark[0].startNs).toBe(0)
+  expect(s.mark[0].endNs).toBe(70)
+  expect(s.cycles).toBe(0)
+})

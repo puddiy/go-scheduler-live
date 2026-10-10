@@ -1,46 +1,28 @@
 package timeline
 
-import "testing"
+import (
+	"bytes"
+	"encoding/json"
+	"testing"
+)
 
-func TestBuildReconstructsSteal(t *testing.T) {
-	// G10 becomes runnable on P0 but runs on P1  -> stolen.
-	// G20 becomes runnable on P0 and runs on P0  -> not stolen.
+func TestBuildDoesNotInventSteals(t *testing.T) {
 	events := []Event{
 		{T: 1, Type: EventGCreate, GID: 10, PID: 0},
-		{T: 2, Type: EventGCreate, GID: 20, PID: 0},
-		{T: 3, Type: EventGRunStart, GID: 20, PID: 0},
-		{T: 4, Type: EventGRunStart, GID: 10, PID: 1},
+		{T: 2, Type: EventGRunStart, GID: 10, PID: 1},
 	}
-
 	tl := Build(events, 4, "test")
-
-	stolen := map[int64]bool{}
 	for _, e := range tl.Events {
-		if e.Type == EventGRunStart {
-			stolen[e.GID] = e.Stolen
+		if e.Stolen {
+			t.Fatal("a creator P differing from the execution P is not evidence of stealing")
 		}
-	}
-	if !stolen[10] {
-		t.Errorf("G10 should be stolen (runnable on P0, ran on P1)")
-	}
-	if stolen[20] {
-		t.Errorf("G20 should not be stolen (runnable and ran on P0)")
 	}
 }
 
-func TestBuildSkipsStealWhenProcUnknown(t *testing.T) {
-	// Unblocked with no associated P (NoResource): we cannot tell -> not stolen.
-	events := []Event{
-		{T: 1, Type: EventGUnblock, GID: 7, PID: NoResource},
-		{T: 2, Type: EventGRunStart, GID: 7, PID: 2},
-	}
-
-	tl := Build(events, 4, "test")
-
-	for _, e := range tl.Events {
-		if e.Type == EventGRunStart && e.Stolen {
-			t.Errorf("G7 should not be flagged stolen when prior P is unknown")
-		}
+func TestObservedProcsIncludesRecordedGOMAXPROCS(t *testing.T) {
+	events := []Event{{Type: EventMetric, GID: NoResource, PID: NoResource, Name: "/sched/gomaxprocs:threads", Value: 6}, {PID: 0}}
+	if got := ObservedProcs(events); got != 6 {
+		t.Fatalf("got %d, want recorded GOMAXPROCS 6", got)
 	}
 }
 
@@ -110,5 +92,15 @@ func TestBuildMeta(t *testing.T) {
 		if tl.Events[i].T < tl.Events[i-1].T {
 			t.Fatalf("events not sorted after Build at index %d", i)
 		}
+	}
+}
+
+func TestZeroMetricValueSurvivesJSON(t *testing.T) {
+	b, err := json.Marshal(Event{Type: EventMetric, Name: "/memory/classes/heap/objects:bytes", Value: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte(`"value":0`)) {
+		t.Fatalf("zero is a measured value, not missing data: %s", b)
 	}
 }

@@ -85,6 +85,14 @@ export function createUploadPanel(
 
   const panel = el('div', 'upload-panel')
   panel.style.display = 'none'
+  panel.setAttribute('role', 'dialog')
+  panel.setAttribute('aria-modal', 'true')
+  panel.setAttribute('aria-label', S.panelTitle)
+  const closeBtn = el('button', 'upload-close', '×')
+  closeBtn.type = 'button'
+  closeBtn.setAttribute('aria-label', S.close)
+  closeBtn.title = S.close
+  panel.append(closeBtn)
   panel.append(el('div', 'upload-panel-title', S.panelTitle))
 
   const steps = document.createElement('ol')
@@ -141,6 +149,22 @@ export function createUploadPanel(
 
   let visible = false
   let uploading = false
+  let returnFocus: HTMLElement | null = null
+
+  function hide(): void {
+    visible = false
+    panel.style.display = 'none'
+    if (panel.contains(document.activeElement)) returnFocus?.focus()
+  }
+  closeBtn.addEventListener('click', hide)
+  panel.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); hide() }
+    if (e.key !== 'Tab') return
+    const buttons = [...panel.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')]
+    const first = buttons[0], last = buttons.at(-1)
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus() }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus() }
+  })
 
   function setUploading(on: boolean): void {
     uploading = on
@@ -200,13 +224,12 @@ export function createUploadPanel(
 
   return {
     show() {
+      if (!visible) returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
       visible = true
       clearError()
       panel.style.display = 'block'
+      chooseBtn.focus()
     },
-    hide() {
-      visible = false
-      panel.style.display = 'none'
-    },
+    hide,
   }
 }

@@ -122,6 +122,14 @@ jobs:
           set +e
           (cd web && node scripts/verify-controls.mjs) 2>&1 | tee "$RUNNER_TEMP/controls.log"
           status=${PIPESTATUS[0]}
+          if [ "$status" -eq 0 ]; then
+            (cd web && node scripts/verify-fidelity.mjs) 2>&1 | tee -a "$RUNNER_TEMP/controls.log"
+            status=${PIPESTATUS[0]}
+          fi
+          if [ "$status" -eq 0 ]; then
+            (cd web && node scripts/verify-inspector.mjs) 2>&1 | tee -a "$RUNNER_TEMP/controls.log"
+            status=${PIPESTATUS[0]}
+          fi
           set -e
 
           if [ "$status" -ne 0 ]; then

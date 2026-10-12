@@ -49,7 +49,7 @@ describe('stateAt', () => {
     expect(s.procs[0].gid).toBe(NO_RESOURCE)
   })
 
-  it('carries the stolen flag onto the running view', () => {
+  it('ignores the obsolete steal heuristic in older recordings', () => {
     const s = stateAt(
       tl([
         { t: 1, type: 'g_create', gid: 7, pid: 0, mid: -1 },
@@ -57,7 +57,7 @@ describe('stateAt', () => {
       ]),
       2,
     )
-    expect(s.goroutines.get(7)?.stolen).toBe(true)
+    expect(s.goroutines.get(7)?.stolen).toBe(false)
   })
 
   it('marks a goroutine dead after exit and frees its P', () => {
@@ -212,5 +212,48 @@ describe('clamp', () => {
     expect(clamp(-1, 0, 10)).toBe(0)
     expect(clamp(5, 0, 10)).toBe(5)
     expect(clamp(11, 0, 10)).toBe(10)
+  })
+})
+
+
+describe('trace boundary fidelity', () => {
+  it('preserves all initial states without inventing a wakeup or execution P', () => {
+    const states = ['runnable', 'waiting', 'running', 'syscall'] as const
+    for (const state of states) {
+      const s = stateAt(tl([{ t: 0, type: 'g_status', gid: 42, pid: 1, mid: 7, state }]), 0)
+      expect(s.goroutines.get(42)?.state).toBe(state)
+      expect(s.goroutines.get(42)?.mid).toBe(state === 'running' || state === 'syscall' ? 7 : -1)
+      expect(s.procs[1].gid).toBe(state === 'running' ? 42 : -1)
+    }
+  })
+
+  it('never retains the waker P as the runnable G binding', () => {
+    const s = stateAt(tl([{ t: 1, type: 'g_unblock', gid: 5, pid: 1, mid: 7 }]), 1)
+    expect(s.goroutines.get(5)?.pid).toBe(NO_RESOURCE)
+  })
+
+  it('does not bind a single M to two Ps', () => {
+    const s = stateAt(tl([
+      { t: 1, type: 'p_start', gid: -1, pid: 0, mid: 7 },
+      { t: 2, type: 'p_start', gid: -1, pid: 1, mid: 7 },
+    ]), 2)
+    expect(s.procs.filter(p => p.mid === 7)).toHaveLength(1)
+  })
+
+  it('tracks recorded GOMAXPROCS changes and disables retired P stations', () => {
+    const s = stateAt(tl([
+      { t: 0, type: 'metric', gid: -1, pid: -1, mid: -1, name: '/sched/gomaxprocs:threads', value: 4 },
+      { t: 1, type: 'metric', gid: -1, pid: -1, mid: -1, name: '/sched/gomaxprocs:threads', value: 1 },
+    ]), 1)
+    expect(s.gomaxprocs).toBe(1)
+    expect(s.procs.slice(1).every(p => p.status === 'inactive')).toBe(true)
+  })
+
+  it('seeds a phase already active at trace start exactly once', () => {
+    const s = stateAt(tl([
+      { t: 0, type: 'gc_range_active', gid: -1, pid: -1, mid: -1, name: 'GC concurrent mark phase' },
+      { t: 1, type: 'gc_range_active', gid: -1, pid: -1, mid: -1, name: 'GC concurrent mark phase' },
+    ]), 1)
+    expect(s.gcActive).toEqual(['GC concurrent mark phase'])
   })
 })

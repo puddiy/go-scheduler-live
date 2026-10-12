@@ -1,5 +1,5 @@
 import type { TimelineEvent } from '../model/timeline'
-import { stealBurst, STEAL_LOOKBACK_NS } from './steal'
+const CAPTION_LOOKBACK_NS = 8_000_000
 import { t as tr } from '../i18n'
 
 // narrate returns a short sentence (in the current UI language) describing the
@@ -11,27 +11,27 @@ import { t as tr } from '../i18n'
 // caption stays consistent with the scene — it never claims stop-the-world after
 // the range has ended (the previous version re-scanned raw events in an 8ms window
 // and lied for ~8ms of trace time, i.e. seconds of wall time at 1x). Point events
-// (steals, blocks, exits) still come from a short look-back window.
+// (blocks, exits) still come from a short look-back window.
 
-// captionWindowNs bounds the caption's look-back to the smaller of the 8ms steal
+// captionWindowNs bounds the caption's look-back to the smaller of the 8ms look-back
 // window and 1% of the whole run, so a short trace (e.g. workstealing ~39ms, where
 // a fixed 8ms is ~20% of the timeline and would persist ~9s of wall time at 1x)
 // does not leave the caption describing something that scrolled off long ago.
 export function captionWindowNs(durationNs: number): number {
-  return Math.max(1, Math.min(STEAL_LOOKBACK_NS, Math.round(durationNs * 0.01)))
+  return Math.max(1, Math.min(CAPTION_LOOKBACK_NS, Math.round(durationNs * 0.01)))
 }
 
 export function narrate(
   events: TimelineEvent[],
   t: number,
   gcActive: string[],
-  windowNs: number = STEAL_LOOKBACK_NS,
+  windowNs: number = CAPTION_LOOKBACK_NS,
   midAlias?: Map<number, number>,
 ): string {
   let bestSal = -1
   let bestText = ''
   const consider = (sal: number, text: string): void => {
-    // Precedence: higher salience always wins (STW > mark > syscall > steal >
+    // Precedence: higher salience always wins (STW > mark > syscall >
     // block > exit); among equal salience, ">=" keeps the latest (events
     // iterate in time order).
     if (sal >= bestSal) {
@@ -46,11 +46,6 @@ export function narrate(
   // GC phase from the live folded state (truthful: only while actually active).
   if (gcActive.some((n) => n.includes('stop-the-world'))) consider(6, N.stw)
   else if (gcActive.some((n) => n.includes('mark phase'))) consider(5, N.mark)
-
-  // Steals are narrated as a batch (P took N): the runtime grabs ~half a victim's
-  // queue at once, not the per-goroutine flag we reconstruct.
-  const burst = stealBurst(events, t, windowNs)
-  if (burst) consider(3, N.steal(burst.pid, burst.count))
 
   for (const e of events) {
     if (e.t > t) break

@@ -26,6 +26,7 @@ export class Controls {
   private readonly runBtn: HTMLButtonElement
   private readonly advanced: HTMLElement
   private readonly modeBtn: HTMLButtonElement
+  readonly inspectBtn: HTMLButtonElement
   private customChip: HTMLButtonElement | null = null
   private uiMode: UiMode = 'learn'
   private customActive = false
@@ -38,6 +39,7 @@ export class Controls {
     private readonly onToggleThreads?: () => boolean,
     private readonly onScenarioChange?: (info: ScenarioInfo) => void,
     private readonly onCustom?: () => void,
+    private readonly onInspect?: () => void,
   ) {
     const S = t()
     const bar = document.createElement('div')
@@ -51,7 +53,16 @@ export class Controls {
       this.player?.toggle()
       this.syncPlayBtn()
     })
+    this.playBtn.classList.add('play-btn')
     const stepBtn = button(S.controls.step, () => this.player?.step())
+    stepBtn.title = S.inspector.next
+    stepBtn.classList.add('step-forward-btn')
+    const backBtn = button(S.inspector.previous, () => this.player?.stepBack())
+    backBtn.classList.add('step-back-btn')
+    this.inspectBtn = button(S.inspector.open, () => this.onInspect?.())
+    this.inspectBtn.classList.add('inspect-btn')
+    this.inspectBtn.setAttribute('aria-controls', 'trace-inspector')
+    this.inspectBtn.setAttribute('aria-expanded', 'false')
 
     const idBtn = button('id', () => {
       const on = this.onToggleIds?.() ?? false
@@ -212,19 +223,13 @@ export class Controls {
     // (scripts/verify-controls.mjs) reads `.controls input[type=number]`[0] as
     // GOMAXPROCS, and .advanced also nests goroutinesInput (type=number) —
     // display:none on .advanced in Learn mode does not change document order.
-    bar.append(
-      this.playBtn,
-      stepBtn,
-      speeds,
-      this.scrub,
-      this.time,
-      this.modeBtn,
-      scenChips,
-      this.scenarioSel,
-      this.procsInput,
-      this.advanced,
-      this.runBtn,
-    )
+    const transport = document.createElement('div')
+    transport.className = 'transport-row'
+    transport.append(this.playBtn, backBtn, stepBtn, speeds, this.scrub, this.time, this.inspectBtn, this.modeBtn)
+    const configuration = document.createElement('div')
+    configuration.className = 'scenario-row'
+    configuration.append(scenChips, this.scenarioSel, this.procsInput, this.advanced, this.runBtn)
+    bar.append(transport, configuration)
     // In the static demo the params pick the nearest baked run rather than
     // recording one, so say so next to the button that appears to record.
     if (isStaticDemo()) bar.append(demoBadge(S.demo.hint, S.demo.tip))

@@ -9,20 +9,20 @@ export interface GoroutineView {
   /**
    * associated P: for `running` it is the P actually executing this goroutine.
    * For `syscall` it is the P the goroutine left on entering the call — the P
-   * itself is already freed (cleared from `procs`) and may be handed to another M;
+   * may still be in _Psyscall, or may have been released to another M;
    * this is only a "came from" hint (shown in the tooltip). For `waiting` it is
    * NO_RESOURCE (a blocked goroutine holds no P).
    */
   pid: number
   /**
-   * OS thread (M) executing this goroutine (`running`) or blocked in the
-   * kernel together with it (`syscall`); NO_RESOURCE otherwise. Real ids from
+   * OS thread (M) executing this goroutine (`running`) or associated with
+   * its recorded syscall (`syscall`); NO_RESOURCE otherwise. Real ids from
    * the trace — bound only on the goroutine's own execution events, because
    * on g_unblock/g_create the event's mid belongs to the unblocker/creator.
    */
   mid: number
   reason?: string
-  /** the current run started as a reconstructed steal. */
+  /** Legacy compatibility field; always false, never interpreted as fact. */
   stolen: boolean
 }
 
@@ -37,10 +37,12 @@ export interface ProcView {
    * runs (the M stays on the P looking for work).
    */
   mid: number
+  status?: 'unknown' | 'running' | 'idle' | 'syscall' | 'inactive'
 }
 
 export interface WorldState {
   t: number
+  gomaxprocs?: number
   procs: ProcView[]
   goroutines: Map<number, GoroutineView>
   /** names of GC ranges active at t (e.g. stop-the-world). */
@@ -66,6 +68,7 @@ export function stateAt(timeline: Timeline, t: number): WorldState {
   }))
   const goroutines = new Map<number, GoroutineView>()
   const gcActive: string[] = []
+  let gomaxprocs: number | undefined
   let heapLive: number | undefined
   let heapGoal: number | undefined
 
@@ -76,7 +79,12 @@ export function stateAt(timeline: Timeline, t: number): WorldState {
     if (pid >= 0 && pid < n && procs[pid].gid === gid) procs[pid].gid = NO_RESOURCE
   }
   const setProcM = (pid: number, mid: number) => {
-    if (pid >= 0 && pid < n && mid >= 0) procs[pid].mid = mid
+    if (pid >= 0 && pid < n && mid >= 0) {
+      // One M can execute with only one P. Release stale ownership on handoff.
+      for (const p of procs) if (p.pid !== pid && p.mid === mid) p.mid = NO_RESOURCE
+      procs[pid].mid = mid
+      procs[pid].status = 'running'
+    }
   }
   const view = (gid: number): GoroutineView => {
     let v = goroutines.get(gid)
@@ -90,22 +98,34 @@ export function stateAt(timeline: Timeline, t: number): WorldState {
   for (const e of timeline.events) {
     if (e.t > t) break
     switch (e.type) {
-      case 'g_create':
-        // e.mid is the CREATOR's M — never bind it to the new goroutine.
+      case 'g_status': {
+        if (!e.state) break
+        const v = view(e.gid)
+        v.state = e.state
+        v.pid = e.state === 'running' || e.state === 'syscall' ? e.pid : NO_RESOURCE
+        v.mid = e.state === 'running' || e.state === 'syscall' ? e.mid : NO_RESOURCE
+        if (e.state === 'running') { setProc(e.pid, e.gid); setProcM(e.pid, e.mid) }
+        break
+      }
+      case 'g_create': {
+        // The ordinary go statement starts Runnable; runtime helpers may be
+        // created Waiting or in Syscall (e.g. cgo). Creator M never binds a
+        // Runnable/Waiting target.
+        const state = e.state ?? 'runnable'
         goroutines.set(e.gid, {
-          gid: e.gid,
-          state: 'runnable',
-          pid: e.pid,
-          mid: NO_RESOURCE,
+          gid: e.gid, state,
+          pid: NO_RESOURCE,
+          mid: state === 'syscall' ? e.mid : NO_RESOURCE,
           stolen: false,
         })
         break
+      }
       case 'g_run_start': {
         const v = view(e.gid)
         v.state = 'running'
         v.pid = e.pid
         v.mid = e.mid
-        v.stolen = e.stolen ?? false
+        v.stolen = false
         v.reason = undefined
         setProc(e.pid, e.gid)
         setProcM(e.pid, e.mid)
@@ -125,7 +145,8 @@ export function stateAt(timeline: Timeline, t: number): WorldState {
         const v = view(e.gid)
         clearProc(e.pid, e.gid)
         v.state = 'runnable'
-        v.pid = e.pid
+        v.reason = e.reason
+        v.pid = NO_RESOURCE
         v.mid = NO_RESOURCE // the M stays on the P (procs keeps it), not on the G
         v.stolen = false
         break
@@ -133,7 +154,8 @@ export function stateAt(timeline: Timeline, t: number): WorldState {
       case 'g_unblock': {
         const v = view(e.gid)
         v.state = 'runnable'
-        v.pid = e.pid
+        v.reason = e.reason
+        v.pid = NO_RESOURCE
         // e.mid is the UNBLOCKER's M; and for syscall->runnable the goroutine's
         // own M just parked. Either way: no M.
         v.mid = NO_RESOURCE
@@ -157,6 +179,7 @@ export function stateAt(timeline: Timeline, t: number): WorldState {
         v.pid = e.pid
         v.mid = e.mid // the M blocks in the kernel together with its G
         v.stolen = false
+        if (e.pid >= 0 && e.pid < n) procs[e.pid].status = 'syscall'
         // procs[pid].mid is left as-is: the M holds the P until sysmon takes
         // it away, which shows up as an explicit p_stop.
         break
@@ -177,12 +200,13 @@ export function stateAt(timeline: Timeline, t: number): WorldState {
         break
       case 'p_stop':
         // e.mid on a steal is the STEALER's M — just drop ownership.
-        if (e.pid >= 0 && e.pid < n) procs[e.pid].mid = NO_RESOURCE
+        if (e.pid >= 0 && e.pid < n) { procs[e.pid].mid = NO_RESOURCE; procs[e.pid].status = 'idle' }
         break
+      case 'gc_range_active':
       case 'gc_range_begin':
         // Skip the tracer's start-trace STW artifact so it never reads as a GC
         // phase (its matching end below simply finds nothing to remove).
-        if (e.name && !isTracerArtifact(e.name)) gcActive.push(e.name)
+        if (e.name && !isTracerArtifact(e.name) && !gcActive.includes(e.name)) gcActive.push(e.name)
         break
       case 'gc_range_end': {
         if (e.name) {
@@ -192,11 +216,18 @@ export function stateAt(timeline: Timeline, t: number): WorldState {
         break
       }
       case 'metric':
-        if (e.name === metricHeapLive) heapLive = e.value
+        if (e.name === '/sched/gomaxprocs:threads' && e.value !== undefined) {
+          gomaxprocs = e.value
+          for (const p of procs) {
+            if (p.pid >= e.value) { p.status = 'inactive'; p.gid = NO_RESOURCE; p.mid = NO_RESOURCE }
+            else if (p.status === 'inactive') p.status = 'unknown'
+          }
+        }
+        else if (e.name === metricHeapLive) heapLive = e.value
         else if (e.name === metricHeapGoal) heapGoal = e.value
         break
     }
   }
 
-  return { t, procs, goroutines, gcActive, heapLive, heapGoal }
+  return { t, gomaxprocs, procs, goroutines, gcActive, heapLive, heapGoal }
 }

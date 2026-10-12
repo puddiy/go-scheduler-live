@@ -12,7 +12,7 @@ func init() {
 // workStealing spawns many short CPU-bound goroutines with no heap allocation,
 // so the trace shows scheduling rather than GC. With GOMAXPROCS > 1 the runtime
 // spreads them across Ps and idle Ps steal goroutines from busy ones — the
-// behavior this scenario exists to make visible.
+// behavior the workload exercises; ordinary trace cannot identify individual steals.
 type workStealing struct{}
 
 func (workStealing) Name() string { return "workstealing" }
@@ -20,8 +20,8 @@ func (workStealing) Name() string { return "workstealing" }
 func (workStealing) Describe() ScenarioInfo {
 	return ScenarioInfo{
 		ID:          "workstealing",
-		Title:       "Кража работы (work-stealing)",
-		Description: "Много коротких CPU-горутин. При GOMAXPROCS>1 простаивающие P крадут горутины у занятых.",
+		Title:       "CPU-планирование",
+		Description: "CPU-горутин больше, чем P. Trace показывает выполнение на разных P; состав очередей и отдельные кражи работы не записываются.",
 		Order:       0,
 		Params: []ParamSpec{
 			{Name: "goroutines", Min: 1, Max: 200, Default: 50},

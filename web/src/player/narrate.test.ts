@@ -13,31 +13,22 @@ describe('narrate', () => {
 
   it('reports stop-the-world only while it is actually active (from gcActive)', () => {
     const events = [ev(100, 'g_run_start', { gid: 7, pid: 1, stolen: true })]
-    expect(narrate(events, 101, ['stop-the-world (GC mark termination)'])).toContain('Stop-the-world')
+    expect(narrate(events, 101, ['stop-the-world (GC mark termination)'])).toContain('STW: записанный интервал')
   })
 
   it('does NOT claim stop-the-world after the range ended, even if a begin is in the window', () => {
     // regression: the old code re-scanned raw events and asserted STW for ~8ms
     // after gc_range_end. With gcActive empty (STW already ended), no STW caption.
     const events = [ev(100, 'gc_range_begin', { name: 'stop-the-world (GC mark termination)' })]
-    expect(narrate(events, 101, [])).not.toContain('Stop-the-world')
+    expect(narrate(events, 101, [])).not.toContain('STW: записанный интервал')
   })
 
   it('reports concurrent mark while the mark phase is active', () => {
     expect(narrate([], 500, ['GC concurrent mark phase'])).toContain('разметк')
   })
 
-  it('describes a steal as a batch (P took N)', () => {
-    expect(narrate([ev(50, 'g_run_start', { gid: 12, pid: 3, stolen: true })], 50, [])).toBe('P3 забрал 1 горутину')
-  })
-
-  it('aggregates several steals onto the same P', () => {
-    const events = [
-      ev(48, 'g_run_start', { gid: 10, pid: 2, stolen: true }),
-      ev(49, 'g_run_start', { gid: 11, pid: 2, stolen: true }),
-      ev(50, 'g_run_start', { gid: 12, pid: 2, stolen: true }),
-    ]
-    expect(narrate(events, 50, [])).toBe('P2 забрал 3 горутины')
+  it('does not narrate legacy heuristic steals as recorded facts', () => {
+    expect(narrate([ev(50, 'g_run_start', { gid: 12, pid: 3, stolen: true })], 50, [])).toBe('')
   })
 
   it('describes a block with its reason', () => {
@@ -82,7 +73,7 @@ describe('narrate syscall handoff', () => {
       W,
       new Map([[6103904256, 1]]),
     )
-    expect(text).toBe('G5 ушла в syscall — M1 блокируется с ней в ядре')
+    expect(text).toBe('G5 ушла в syscall — M1 выполняет системный вызов')
   })
 
   it('falls back to the raw mid without an alias map', () => {
@@ -100,12 +91,12 @@ describe('narrate syscall handoff', () => {
     expect(text).toBe('G5 вернулась из syscall на P2')
   })
 
-  it('outranks a steal burst but yields to stop-the-world', () => {
+  it('ignores legacy steal flags and yields to the recorded STW interval', () => {
     const events = [
       ev(9, 'g_run_start', { gid: 1, pid: 0, stolen: true }),
       ev(10, 'g_syscall_enter', { gid: 5, pid: 1, mid: 42 }),
     ]
     expect(narrate(events, 10, [], W)).toContain('syscall')
-    expect(narrate(events, 10, ['stop-the-world (GC mark termination)'], W)).toContain('Stop-the-world')
+    expect(narrate(events, 10, ['stop-the-world (GC mark termination)'], W)).toContain('STW: записанный интервал')
   })
 })

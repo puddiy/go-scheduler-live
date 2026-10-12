@@ -3,7 +3,7 @@
 // golang.org/x/exp/trace; everything downstream works with timeline.Event.
 //
 // Parse returns events in trace order. Assembling the final Timeline (metadata,
-// sorting, work-stealing reconstruction) is timeline.Build's job.
+// sorting and metadata) is timeline.Build's job.
 package traceparse
 
 import (
@@ -19,8 +19,9 @@ import (
 // Heap metric names forwarded to the frontend, discovered from real traces.
 // Note: "live heap" is the memory-classes objects metric, not /gc/heap/live.
 const (
-	metricHeapGoal = "/gc/heap/goal:bytes"
-	metricHeapLive = "/memory/classes/heap/objects:bytes"
+	metricGOMAXPROCS = "/sched/gomaxprocs:threads"
+	metricHeapGoal   = "/gc/heap/goal:bytes"
+	metricHeapLive   = "/memory/classes/heap/objects:bytes"
 
 	// metricMinGapNs is the minimum trace-time gap between kept samples of the
 	// same metric (downsampling for a smooth-enough heap bar).
@@ -35,10 +36,12 @@ func Parse(r io.Reader) ([]timeline.Event, error) {
 	}
 
 	var (
-		events     []timeline.Event
-		haveT0     bool
-		t0         exptrace.Time
-		lastMetric = map[string]int64{} // last emitted time per metric, for downsampling
+		events       []timeline.Event
+		haveT0       bool
+		t0           exptrace.Time
+		lastNs       int64
+		activeRanges = map[string]bool{}
+		lastMetric   = map[string]int64{} // last emitted time per metric, for downsampling
 	)
 
 	// rel converts an absolute trace time to ns since the first event seen.
@@ -58,17 +61,26 @@ func Parse(r io.Reader) ([]timeline.Event, error) {
 			return nil, fmt.Errorf("reading trace event: %w", err)
 		}
 
+		lastNs = rel(ev.Time())
 		switch ev.Kind() {
 		case exptrace.EventStateTransition:
 			if e, ok := mapTransition(ev, rel); ok {
 				events = append(events, e)
 			}
+		case exptrace.EventRangeActive:
+			name := ev.Range().Name
+			if keepRange(name) && !activeRanges[name] {
+				activeRanges[name] = true
+				events = append(events, rangeEvent(timeline.EventGCRangeActive, ev, rel))
+			}
 		case exptrace.EventRangeBegin:
 			if keepRange(ev.Range().Name) {
+				activeRanges[ev.Range().Name] = true
 				events = append(events, rangeEvent(timeline.EventGCRangeBegin, ev, rel))
 			}
 		case exptrace.EventRangeEnd:
 			if keepRange(ev.Range().Name) {
+				delete(activeRanges, ev.Range().Name)
 				events = append(events, rangeEvent(timeline.EventGCRangeEnd, ev, rel))
 			}
 		case exptrace.EventMetric:
@@ -76,7 +88,7 @@ func Parse(r io.Reader) ([]timeline.Event, error) {
 				// Downsample: the heap metric is emitted thousands of times under
 				// allocation pressure; one sample per metricMinGapNs is plenty for
 				// a smooth heap bar.
-				if last, seen := lastMetric[e.Name]; !seen || e.T-last >= metricMinGapNs {
+				if last, seen := lastMetric[e.Name]; e.Name == metricGOMAXPROCS || !seen || e.T-last >= metricMinGapNs {
 					lastMetric[e.Name] = e.T
 					events = append(events, e)
 				}
@@ -84,6 +96,9 @@ func Parse(r io.Reader) ([]timeline.Event, error) {
 		}
 	}
 
+	if haveT0 {
+		events = append(events, timeline.Event{T: lastNs, Type: timeline.EventTraceEnd, GID: timeline.NoResource, PID: timeline.NoResource, MID: timeline.NoResource})
+	}
 	return events, nil
 }
 
@@ -107,7 +122,7 @@ func rangeEvent(typ timeline.EventType, ev exptrace.Event, rel func(exptrace.Tim
 
 func metricEvent(ev exptrace.Event, rel func(exptrace.Time) int64) (timeline.Event, bool) {
 	m := ev.Metric()
-	if m.Name != metricHeapGoal && m.Name != metricHeapLive {
+	if m.Name != metricHeapGoal && m.Name != metricHeapLive && m.Name != metricGOMAXPROCS {
 		return timeline.Event{}, false
 	}
 	if m.Value.Kind() != exptrace.ValueUint64 {
@@ -142,7 +157,17 @@ func mapTransition(ev exptrace.Event, rel func(exptrace.Time) int64) (timeline.E
 			PID:  procID(ev.Proc()),
 			MID:  threadID(ev.Thread()),
 		}
-		if typ == timeline.EventGBlock {
+		if typ == timeline.EventGCreate || typ == timeline.EventGUnblock {
+			actor := int64(ev.Goroutine())
+			e.ActorGID = &actor
+		}
+		if typ == timeline.EventGStatus || (typ == timeline.EventGCreate && to != exptrace.GoRunnable) {
+			e.State = strings.ToLower(to.String())
+			if to != exptrace.GoRunning && to != exptrace.GoSyscall {
+				e.PID, e.MID = timeline.NoResource, timeline.NoResource
+			}
+		}
+		if typ == timeline.EventGBlock || typ == timeline.EventGRunStop {
 			e.Reason = st.Reason
 		}
 		return e, true
@@ -154,11 +179,12 @@ func mapTransition(ev exptrace.Event, rel func(exptrace.Time) int64) (timeline.E
 			return timeline.Event{}, false
 		}
 		return timeline.Event{
-			T:    rel(ev.Time()),
-			Type: typ,
-			GID:  timeline.NoResource,
-			PID:  int64(st.Resource.Proc()),
-			MID:  threadID(ev.Thread()),
+			T:       rel(ev.Time()),
+			Type:    typ,
+			GID:     timeline.NoResource,
+			PID:     int64(st.Resource.Proc()),
+			MID:     threadID(ev.Thread()),
+			Initial: from == exptrace.ProcUndetermined || from == exptrace.ProcNotExist,
 		}, true
 	}
 	return timeline.Event{}, false
@@ -188,7 +214,11 @@ func threadID(m exptrace.ThreadID) int64 {
 // general "became running" case, which they would otherwise be swallowed by.
 func goEventType(from, to exptrace.GoState) (timeline.EventType, bool) {
 	switch {
-	case from == exptrace.GoNotExist && to == exptrace.GoRunnable:
+	case from == to:
+		return "", false
+	case from == exptrace.GoUndetermined:
+		return timeline.EventGStatus, true
+	case from == exptrace.GoNotExist:
 		return timeline.EventGCreate, true
 	case from == exptrace.GoSyscall && to == exptrace.GoRunning:
 		return timeline.EventGSyscallExit, true
@@ -201,8 +231,8 @@ func goEventType(from, to exptrace.GoState) (timeline.EventType, bool) {
 	case from == exptrace.GoWaiting && to == exptrace.GoRunnable:
 		return timeline.EventGUnblock, true
 	case from == exptrace.GoSyscall && to == exptrace.GoRunnable:
-		// Returned from a syscall but the P was taken while it was parked, so it
-		// is now runnable (not running). Treated as "became runnable".
+		// Returned from syscall into Runnable. This alone does not establish
+		// whether a P was unavailable or why scheduling was needed.
 		return timeline.EventGUnblock, true
 	case from == exptrace.GoRunning && to == exptrace.GoRunnable:
 		return timeline.EventGRunStop, true
@@ -216,6 +246,10 @@ func goEventType(from, to exptrace.GoState) (timeline.EventType, bool) {
 // procEventType maps a proc (from,to) transition to a timeline event type.
 func procEventType(from, to exptrace.ProcState) (timeline.EventType, bool) {
 	switch {
+	case from == to:
+		return "", false
+	case (from == exptrace.ProcUndetermined || from == exptrace.ProcNotExist) && to == exptrace.ProcIdle:
+		return timeline.EventPStop, true
 	case to == exptrace.ProcRunning:
 		return timeline.EventPStart, true
 	case from == exptrace.ProcRunning && to == exptrace.ProcIdle:

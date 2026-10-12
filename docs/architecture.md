@@ -108,9 +108,9 @@ because that is a programming error and should be loud.
 
 | Order | Name | Teaches |
 |---:|---|---|
-| 0 | `workstealing` | idle Ps steal from busy ones |
+| 0 | `workstealing` | CPU scheduling across Ps; queue membership and steals remain unknown |
 | 1 | `pingpong` | a ring of goroutines passing tokens; most wait on `chan receive` |
-| 2 | `syscalls` | the M blocks in the kernel with its G; sysmon retakes the P (unix only) |
+| 2 | `syscalls` | blocking syscall on M; recorded P release and handoff (unix only) |
 | 3 | `gcpressure` | allocation drives GC cycles: concurrent mark plus stop-the-world |
 | 4 | `mutexhot` | one `sync.Mutex` serializes N workers regardless of P count |
 | 5 | `leak` | goroutines block forever on a channel nobody writes to |
@@ -141,9 +141,8 @@ be a pure function — state folding, GC summary, layout, causality rows,
 viewport math, share codec, i18n — lives outside the renderer on purpose.
 
 Playback time: `1x` replays the whole run in about 90 seconds of wall time
-(`BASE_WALL_MS`), normalized to trace duration. The absolute traces are tens of
-milliseconds long. An earlier 45s pace made dense scenarios flicker, because
-states changed faster than sprites could finish interpolating between them.
+(`BASE_WALL_MS`), normalized to trace duration. The time axis shows the recorded duration. G and M positions change atomically
+at state transitions; poses are decorative. Pause stops the animation clock.
 
 ### Reading `mid`
 
@@ -151,26 +150,48 @@ states changed faster than sprites could finish interpolating between them.
 always the M you want. On `g_unblock` and `g_create` it is the M of the waker or
 creator, not of the target goroutine; on a `p_stop` caused by `ProcSteal` it is
 the M of the thief. So the frontend binds `mid` only on own-execution events —
-`g_run_start`, `g_syscall_enter`, `g_syscall_exit`, `p_start` — and treats
-everything else as a reset. The binding table lives in `stateAt` under vitest,
+`g_status` (Running/Syscall), `g_run_start`, `g_syscall_enter`,
+`g_syscall_exit`, `p_start` — and releases G bindings when G becomes Runnable/Waiting/Dead.
+Creator and waker identities use `Event.Goroutine()` directly; old timelines
+without `actorGid` fall back to observed Running context. The binding table lives in `stateAt` under vitest,
 and the same invariants are mirrored in Go by `TestSchedulerInvariants`.
 
-## What is real and what is reconstructed
+## Recorded facts and unobservable internals
 
-The distinction is the point of the project, so it is enforced in the UI by the
-always-visible **Assumptions** panel.
+The always-visible **Assumptions** disclosure states the boundary. This project
+uses an ordinary Go runtime; it does not instrument scheduler queues.
 
-| Real trace data | Reconstructed or stylized |
+| Shown from trace | Unknown or decorative |
 |---|---|
-| goroutine state transitions and block reasons | membership of a P's local run queue |
-| P and M bindings on own-execution events | which goroutine was stolen (heuristic, flagged `Stolen`) |
-| GC cycles, mark phases, STW durations | parked M's (the trace has no M lifecycle) |
-| heap metrics (downsampled) | queue capacity: 6 shown vs 256 real |
-| syscall enter/exit and sysmon retake | time scale, slowed thousands of times |
-| — | for an **uploaded trace**, `numProcs` (lower bound: distinct Ps *observed* in the trace, not the true `GOMAXPROCS` the program ran with — the trace format doesn't record `GOMAXPROCS` itself) |
+| All observed G states, including initial snapshots | Local/global queue membership, runnext, individual steals |
+| P/M bindings on own-execution events | Parked M lifecycle, unrecorded context |
+| Recorded creator/waker G context (`actorGid`) | Actor unknown when the trace context is absent |
+| Complete mark phases and runtime STW intervals | Missing range boundaries; no fabricated GC cycle completion |
+| Allocated-object heap bytes / soft GC goal | Heap tiles and GC robot are a visual scale |
+| GOMAXPROCS metric and changes | Older payloads without it give a P-count lower bound |
+| Syscall state and P release/acquisition events | P-stop initiator and next owner are not inferred |
 
-Reconstructions are marked `(reconstr.)` in tooltips and are kept **out of the
-event log**, which shows only facts.
+`g_status` records the first observed state, rather than inventing a creation or
+run start. An initially observed state has an unknown start; log durations are
+lower bounds (`≥`) until a real transition is recorded. `gc_range_active` likewise
+seeds an already active range without claiming its true beginning. Complete
+mark phases alone contribute to the mark counter. Runtime STW need not be GC.
+
+`trace_end` preserves the last raw event timestamp even when filtering drops
+that event. Heap metrics retain at most one sample per name per 2 ms;
+GOMAXPROCS samples are never downsampled. Zero metric values survive JSON.
+`meta.numProcs` reserves space for the largest observed P ID or GOMAXPROCS;
+`world.gomaxprocs` is the value at the playhead. Retired stations are inactive.
+
+Runnable Gs occupy one unassigned area. `+N` and the runtime counts include
+hidden sprites; the drawing cap is not queue capacity. A change of P cannot
+prove a steal. Legacy `stolen` flags are ignored, and new timelines clear them.
+
+STWStart precedes the last stopped P, and STWDone follows restarting Ps. The
+red cue highlights the recorded range but never overrides observed G states
+with a global freeze. Its visible flash lasts 320 ms; the displayed duration
+uses trace time. See [the fidelity audit](fidelity-audit.md) for source references
+and the regression checks.
 
 ## UI states: picking what to replay, and how
 
@@ -207,7 +228,7 @@ Hard-won; each one cost a debugging session.
   raw `syscall.Pipe` and `syscall.Read` on a blocking fd. `time.Sleep` is a
   timer park, not a syscall either.
 - **`goEventType` must cover `Syscall→Runnable`.** A goroutine that leaves a
-  syscall whose P was already taken maps to `g_unblock`; miss it and the
+  syscall through the Runnable state maps to `g_unblock`; miss it and the
   goroutine stays stuck in the syscall zone forever.
 - **`traceparse` filters and downsamples on purpose.** Ranges are reduced to
   meaningful GC phases (`stop-the-world`, `mark phase`), dropping
@@ -230,13 +251,14 @@ node scripts/shoot.mjs            # screenshots for visual review
 ```
 
 `TestSchedulerInvariants` is the backbone: across every scenario it asserts that
-the number of simultaneously running goroutines matches the raw trace and never
+every normalized G transition and actor agrees with the raw trace; running G count never
 exceeds `GOMAXPROCS`, that no goroutine starts twice, that P assignments never
 conflict, that an M runs at most one G, and that a syscall returns on the same M.
 Scenario tests are anti-regressions with real thresholds — `syscalls`, for
 example, requires at least five `g_syscall_enter` events and at least two
 distinct MIDs on one P.
 
-The visual layer is verified headlessly rather than by eye: `shoot.mjs` drives
+The visual layer is verified with browser assertions and inspected screenshots: `shoot.mjs` drives
 the player through `window.gmp` and writes PNGs, and `verify-controls.mjs`
-asserts a contract over every interactive control.
+asserts a contract over every interactive control. `verify-fidelity.mjs` also
+checks scene positions, counters, pause, death, STW, upload focus and resizing.

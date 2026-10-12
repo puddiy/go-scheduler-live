@@ -81,8 +81,7 @@ export function drawStation(g: Graphics, sx: number, sy: number): void {
 }
 
 // drawIdleMarker draws the floor796-style dashed outline on top of a P platform
-// that currently has no running goroutine — an idle P, available to be stolen
-// onto. Drawn into a per-frame fx layer by the scene (occupancy is dynamic).
+// whose recorded state is Idle. Drawn into a per-frame fx layer by the scene (occupancy is dynamic).
 export function drawIdleMarker(g: Graphics, sx: number, sy: number): void {
   const tw = 46
   const th = 23
@@ -102,23 +101,8 @@ export function drawIdleMarker(g: Graphics, sx: number, sy: number): void {
       const t1 = (s + 1) / segs
       g.moveTo(a[0] + (b[0] - a[0]) * t0, a[1] + (b[1] - a[1]) * t0)
         .lineTo(a[0] + (b[0] - a[0]) * t1, a[1] + (b[1] - a[1]) * t1)
-        .stroke({ width: 1, color: PAL.steal, alpha: 0.55 })
+        .stroke({ width: 1, color: PAL.platEdge, alpha: 0.55 })
     }
-  }
-}
-
-// drawStationGlow draws a soft amber ring on a P platform that just received
-// stolen work — the aggregate steal cue (alpha fades in the scene's fx loop).
-export function drawStationGlow(g: Graphics, sx: number, sy: number, alpha: number): void {
-  const tw = 46
-  const th = 23
-  for (let i = 0; i < 3; i++) {
-    const k = 1 + i * 0.18
-    g.poly([sx, sy - (th / 2) * k, sx + (tw / 2) * k, sy, sx, sy + (th / 2) * k, sx - (tw / 2) * k, sy]).stroke({
-      width: 1.5,
-      color: PAL.runnable,
-      alpha: alpha * (0.5 - i * 0.12),
-    })
   }
 }
 

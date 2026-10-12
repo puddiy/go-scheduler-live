@@ -43,9 +43,7 @@ export function createPresentMode(opts: {
   playBtn.className = 'present-play'
   playBtn.addEventListener('click', () => {
     playerRef()?.toggle()
-    // Player.pause() doesn't emit a tick, so Controls.sync() never runs on its
-    // own — let the caller (main.ts) keep the main control bar's play/pause
-    // label in sync, mirroring the Space-key handler's own workaround.
+    // Sync immediately on play as well as on the player's published pause.
     onPlayerToggle?.()
     syncWand()
   })
@@ -56,6 +54,7 @@ export function createPresentMode(opts: {
   seek.min = '0'
   seek.max = '1000'
   seek.value = '0'
+  seek.setAttribute('aria-label', tr().controls.ariaScrub)
   seek.addEventListener('input', () => {
     const p = playerRef()
     if (!p) return
@@ -72,6 +71,7 @@ export function createPresentMode(opts: {
   closeBtn.className = 'present-close'
   closeBtn.textContent = '✕'
   closeBtn.title = tr().present.exitTip
+  closeBtn.setAttribute('aria-label', tr().present.exitTip)
   closeBtn.addEventListener('click', () => exit())
 
   wand.append(playBtn, seek, time, closeBtn)

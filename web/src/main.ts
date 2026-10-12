@@ -11,7 +11,9 @@ import { createUploadPanel, traceFacts } from './ui/uploadtrace'
 import { midAliases } from './scene/layout'
 import { t, getLang, scenarioTitle, scenarioDesc } from './i18n'
 import { subscribe as subscribeUiMode, getState as getUiModeState, type UiState } from './ui/uimode'
+import { allowPlaybackShortcut } from './ui/shortcuts'
 import { createPresentMode } from './ui/present'
+import { Inspector } from './ui/inspector'
 
 // A run either replays a curated scenario (fetched via fetchRun, share-able,
 // remembered as lastRun for re-runs) or replays a trace the visitor uploaded
@@ -56,6 +58,23 @@ async function boot(): Promise<void> {
   let player: Player | null = null
   let timeline: Timeline | null = null
 
+  const inspector = new Inspector()
+  const workspace = document.createElement('div')
+  workspace.className = 'scene-workspace'
+  workspace.append(stage, inspector.root)
+  inspector.onSelect = selection => {
+    player?.pause()
+    scene?.setSelection(selection)
+    controls.inspectBtn.setAttribute('aria-expanded', String(!inspector.root.hidden))
+    for (const pill of stage.querySelectorAll('.proc-pill')) {
+      pill.setAttribute('aria-pressed', String(selection?.kind === 'p' && Number((pill as HTMLElement).dataset.pid) === selection.id))
+    }
+    controls.sync()
+  }
+  inspector.onClose = () => controls.inspectBtn.focus({ preventScroll: true })
+  inspector.onSeek = ns => { player?.pause(); player?.seek(ns); controls.sync() }
+  chrome.onSelectProc = pid => inspector.select({ kind: 'p', id: pid })
+
   const eventLog = new EventLog()
   // The unified timeline sits in the control panel, just above the transport row.
   const timelineBar = new TimelineBar()
@@ -64,7 +83,7 @@ async function boot(): Promise<void> {
     player?.seek(ns)
     controls.sync()
   }
-  root.append(chrome.header, stage, eventLog.root, chrome.legend, timelineBar.root)
+  root.append(chrome.header, workspace, eventLog.root, chrome.legend, timelineBar.root)
   const controls = new Controls(
     root,
     scenarios,
@@ -82,6 +101,10 @@ async function boot(): Promise<void> {
       uploadPanel.hide()
     },
     () => uploadPanel.show(),
+    () => {
+      if (!inspector.root.hidden) inspector.close()
+      else { player?.pause(); inspector.open(); controls.inspectBtn.setAttribute('aria-expanded', 'true') }
+    },
   )
 
   // "Upload your own trace" panel: shown over the stage in custom mode
@@ -190,6 +213,7 @@ async function boot(): Promise<void> {
     if (!scene) {
       scene = await Scene.create(stage, tl.meta.numProcs)
       scene.onLayout = () => chrome.layout()
+      scene.onSelect = selection => inspector.select(selection)
       chrome.attachScene(scene)
     } else {
       scene.reset(tl.meta.numProcs)
@@ -199,6 +223,7 @@ async function boot(): Promise<void> {
     chrome.setTimeline(tl)
     timelineBar.setTimeline(tl)
     eventLog.build(tl.events, midAliases(tl.events))
+    inspector.setTimeline(tl)
     if (source.kind === 'scenario') {
       chrome.setScenario(scenarioInfo(source.params.scenario))
       intro.show(scenarioInfo(source.params.scenario))
@@ -214,10 +239,11 @@ async function boot(): Promise<void> {
     const sc = scene
     const p = new Player(tl)
     p.onTick = (w) => {
-      sc.setWorld(w)
-      chrome.update(w)
+      sc.setWorld(w, p.playing)
+      chrome.update(w, p.playing)
       timelineBar.render(w.t)
       eventLog.setT(w.t)
+      inspector.update(w)
       controls.sync()
       // Paused emits are discrete (seek/step/pause) — safe to mirror into the
       // URL; while playing the URL keeps the run params without t.
@@ -282,14 +308,19 @@ async function boot(): Promise<void> {
   }
 
   window.addEventListener('keydown', (e) => {
+    if (e.defaultPrevented || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return
+    if (e.code === 'Escape') {
+      if (getUiModeState().present) present.exit()
+      else if (!inspector.root.hidden) inspector.close()
+      return
+    }
+    if (!allowPlaybackShortcut(e.target)) return
     if (e.code === 'Space') {
       e.preventDefault()
       player?.toggle()
       controls.sync() // keyboard toggle doesn't emit a tick when pausing — sync the label
     } else if (e.code === 'KeyF') {
       present.toggle()
-    } else if (e.code === 'Escape') {
-      present.exit() // a no-op when present mode is already inactive
     }
   })
 }
@@ -350,7 +381,7 @@ function makeIntro(stage: HTMLElement): { show(info: ScenarioInfo | undefined): 
         body.innerHTML = teach
       }
       title.textContent = info ? scenarioTitle(info) : t().intro.defaultTitle
-      card.style.display = 'block'
+      card.style.display = 'flex'
     },
   }
 }

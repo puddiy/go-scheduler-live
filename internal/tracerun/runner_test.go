@@ -3,6 +3,9 @@ package tracerun
 import (
 	"bytes"
 	"context"
+	exptrace "golang.org/x/exp/trace"
+	"io"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -210,6 +213,8 @@ func TestSchedulerInvariants(t *testing.T) {
 				t.Fatalf("Parse: %v", err)
 			}
 
+			assertRawTransitions(t, raw, events)
+
 			running := map[int64]int64{}  // gid -> pid
 			occupant := map[int64]int64{} // pid -> gid
 			// M bindings mirror the frontend rule table: an M binds to a G only
@@ -239,6 +244,15 @@ func TestSchedulerInvariants(t *testing.T) {
 			maxRunning := 0
 			for _, e := range events {
 				switch e.Type {
+				case timeline.EventGStatus:
+					switch e.State {
+					case "running":
+						running[e.GID] = e.PID
+						occupant[e.PID] = e.GID
+						bindM(e)
+					case "syscall":
+						bindM(e)
+					}
 				case timeline.EventGRunStart, timeline.EventGSyscallExit:
 					if _, ok := running[e.GID]; ok {
 						t.Fatalf("G%d started while already running at t=%d", e.GID, e.T)
@@ -305,5 +319,90 @@ func TestSchedulerInvariants(t *testing.T) {
 func TestRunRejectsEmptyScenario(t *testing.T) {
 	if _, err := Run(context.Background(), Request{}); err == nil {
 		t.Fatal("expected error for empty scenario")
+	}
+}
+
+// Compare every normalized G transition with the independent trace reader,
+// including snapshots and executing actors, on every real workload above.
+func assertRawTransitions(t *testing.T, raw []byte, events []timeline.Event) {
+	t.Helper()
+	type observed struct {
+		time, gid int64
+		state     string
+		actor     *int64
+	}
+	reader, err := exptrace.NewReader(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var first exptrace.Time
+	haveFirst := false
+	var want, got []observed
+	for {
+		e, err := reader.ReadEvent()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !haveFirst {
+			first = e.Time()
+			haveFirst = true
+		}
+		if e.Kind() != exptrace.EventStateTransition {
+			continue
+		}
+		st := e.StateTransition()
+		if st.Resource.Kind != exptrace.ResourceGoroutine {
+			continue
+		}
+		from, to := st.Goroutine()
+		if from == to {
+			continue
+		}
+		state := strings.ToLower(to.String())
+		if to == exptrace.GoNotExist {
+			state = "dead"
+		}
+		o := observed{time: int64(e.Time().Sub(first)), gid: int64(st.Resource.Goroutine()), state: state}
+		if from == exptrace.GoNotExist || (to == exptrace.GoRunnable && (from == exptrace.GoWaiting || from == exptrace.GoSyscall)) {
+			actor := int64(e.Goroutine())
+			o.actor = &actor
+		}
+		want = append(want, o)
+	}
+	for _, e := range events {
+		var state string
+		switch e.Type {
+		case timeline.EventGStatus:
+			state = e.State
+		case timeline.EventGCreate:
+			state = e.State
+			if state == "" {
+				state = "runnable"
+			}
+		case timeline.EventGRunStart, timeline.EventGSyscallExit:
+			state = "running"
+		case timeline.EventGRunStop, timeline.EventGUnblock:
+			state = "runnable"
+		case timeline.EventGBlock:
+			state = "waiting"
+		case timeline.EventGSyscallEnter:
+			state = "syscall"
+		case timeline.EventGExit:
+			state = "dead"
+		default:
+			continue
+		}
+		got = append(got, observed{time: e.T, gid: e.GID, state: state, actor: e.ActorGID})
+	}
+	if !reflect.DeepEqual(got, want) {
+		for i := 0; i < min(len(got), len(want)); i++ {
+			if !reflect.DeepEqual(got[i], want[i]) {
+				t.Fatalf("G transition %d: normalized %+v != raw %+v", i, got[i], want[i])
+			}
+		}
+		t.Fatalf("G transitions: normalized count %d != raw count %d", len(got), len(want))
 	}
 }

@@ -1,16 +1,15 @@
 import { Application, Container, Graphics, Texture, type FederatedPointerEvent } from 'pixi.js'
 import type { GState, GoroutineView, WorldState } from '../player/state'
 import { t as tr } from '../i18n'
-import type { Timeline, TimelineEvent } from '../model/timeline'
+import type { Timeline } from '../model/timeline'
+import type { ResourceSelection } from '../ui/inspector'
 import { gcSummary, stwInWindow, isPlaybackStep, STW_FLASH_MS, type GcSummary } from '../player/gc'
-import { stealBurst, STEAL_LOOKBACK_NS } from '../player/steal'
 import { PAL, stateColors } from './palette'
 import { gopherCanvas, type GopherOpts } from './drawgopher'
 import {
   drawGrid,
   drawStation,
   drawIdleMarker,
-  drawStationGlow,
   drawZoneFloor,
   drawProps,
   stationPositions,
@@ -34,7 +33,6 @@ import {
   BOT_DOCK,
   SIREN_POS,
 } from './factory'
-import { walkKind, buildPath, walkAt, isHop, type WalkPath, type WalkConsts } from './walk'
 import { clampView, fitView, panBy, zoomAt, type View, type ViewBounds } from './viewport'
 import { makeGopher, type Gopher } from './gopher'
 import { threadCanvas } from './drawthread'
@@ -47,28 +45,7 @@ const POOF_MS = 320
 const MAX_ZOOM = 6
 const WHEEL_SENS = 0.0015
 const PAN_THRESHOLD_PX = 4
-// STW is a real but sub-millisecond pause; we flash it as a brief blink (the world
-// truly freezes, but only for an instant) — never a long held freeze, which would
-// misrepresent modern Go's whole achievement. The honest duration lives in the
-// caption ("84µs") and the to-scale GC strip; this is just a visible cue.
-// STW_FLASH_MS is shared with the chrome banner (see player/gc.ts) so both fade together.
-const GLOW_MS = 600
-
-// Data-driven walks (opt-in via ?walk): when a real state transition lands on a
-// playback step, the gopher walks a routed path to its new spot instead of the
-// straight lerp. The tween is cosmetic (wall-clock paced, capped), tied to a real
-// transition. The proven lerp stays the default so this stays a contained experiment.
-const WALK_FPS = 7
-const MIN_WALK_DIST = 26 // px; smaller moves just lerp (no detour)
-const MAX_WALKS = 40 // cap concurrent walks so a burst degrades to lerp, not jank
-const WALK_CONSTS: WalkConsts = { corridorY: 214, spawnGate: { x: 44, y: 44 }, exitGate: { x: 532, y: 44 } }
-function walkDuration(len: number): number {
-  return Math.max(380, Math.min(820, len * 4))
-}
-// Captured at module import — before main.ts's first run rewrites the address bar
-// via history.replaceState (which drops the ?walk flag). Reading it in the Scene
-// constructor would be too late (the flag would already be gone).
-const WALKS_ENABLED = typeof location !== 'undefined' && new URLSearchParams(location.search).has('walk')
+// The STW flash highlights a recorded range; individual G states remain authoritative.
 
 // State names for tooltips come from the i18n dictionary (scene.states).
 
@@ -83,7 +60,6 @@ interface Rec {
   kind: AnimKind
   phase: number // per-gopher animation phase offset (de-syncs the crowd)
   dying: number // dead-poof timer (ms remaining); 0 = alive
-  walk?: { path: WalkPath; elapsed: number; dur: number; hop: boolean } // active routed walk (?walk)
 }
 
 // bakeTextures bakes a small frame atlas per animated state once; the scene cycles
@@ -112,13 +88,7 @@ function bakeTextures() {
       { state: 'syscall', flip: true, dots: 3 },
     ]),
     dead: arr([{ state: 'dead', dead: true }]),
-    // travel pose for routed walks (?walk): a neutral amber gopher, arms up, with
-    // motion lines; facing is flipped live by the sprite, so bake it unflipped.
-    walk: arr([
-      { state: 'runnable', run: true, motion: true, armPhase: 1 },
-      { state: 'runnable', run: true, motion: true, armPhase: -1 },
-    ]),
-    frozen: t({ frozen: true, bang: true }),
+
   }
 }
 
@@ -134,7 +104,7 @@ interface TRec {
 }
 
 // bakeThreadTextures bakes the M carrier's frames: a 2-frame status-lamp blink
-// plus the STW frozen recolor. NEAREST, like every sprite in the world.
+// with NEAREST sampling, like every sprite in the world.
 function bakeThreadTextures() {
   const t = (o: Parameters<typeof threadCanvas>[0]): Texture => {
     const tx = Texture.from(threadCanvas(o))
@@ -143,7 +113,6 @@ function bakeThreadTextures() {
   }
   return {
     idle: [t({ lit: true }), t({ lit: false })],
-    frozen: t({ frozen: true }),
   }
 }
 
@@ -151,13 +120,15 @@ const THREAD_BLINK_FPS = 2
 
 // Scene renders the isometric pixel-art world: floor grid + cozy props + N
 // P-stations (with idle-P markers), zone floor platters, and one gopher Sprite per
-// goroutine placed+scaled by placeIso and depth-sorted by screen-y. A steal shows
-// as an aggregate amber glow on the destination P (driven by the reconstructed
-// steal bursts, never a per-goroutine flash); a stop-the-world shows as a brief
-// red vignette blink whose real duration is reported by the chrome caption.
+// goroutine placed by placeIso. A recorded STW range triggers a brief red cue;
+// it does not override individual goroutine states.
 export class Scene {
   /** fired after every fit() (resize) so DOM chrome can re-anchor zone pills. */
   onLayout?: () => void
+  onSelect?: (selection: ResourceSelection) => void
+  private selection: ResourceSelection | null = null
+  private selectionDragged = false
+  private readonly selectionG = new Graphics()
 
   private gophers = new Map<number, Rec>()
   private threads = new Map<number, TRec>()
@@ -182,21 +153,19 @@ export class Scene {
   private tagRes = 1 // current id-tag rasterization bucket
 
   // event-cue state
-  private events: TimelineEvent[] = []
   private midAlias = new Map<number, number>()
   private gc: GcSummary = { cycles: 0, stw: [], mark: [], maxStwNs: 0 }
   private durationNs = 0
   private lastT = -1
   private stwFlash = 0
-  private readonly walksEnabled = WALKS_ENABLED
   private stepPlayback = false // was the last setWorld a forward playback step (vs a scrub/seek)?
-  private activeWalks = 0
-  private frozenAnimT = 0 // animT latched while STW-frozen so structures stop with the world
+  private playbackActive = false
+  private readonly reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches
   private heapCount = 2 // heap pile tile count from the real heap fill
   private gcMark = false // concurrent mark active → robot sweeps, heap pulses
   private stations: Pt[] = []
   private occupied: boolean[] = []
-  private stationGlow: number[] = []
+  private procStates: WorldState['procs'][number]['status'][] = []
 
   private constructor(
     private readonly app: Application,
@@ -211,6 +180,7 @@ export class Scene {
       this.backdrop.container,
       this.stationsG,
       this.fxG,
+      this.selectionG,
       this.gopherLayer,
       this.stwOverlay,
     )
@@ -264,6 +234,8 @@ export class Scene {
     let down = false
     let panning = false
     el.addEventListener('pointerdown', (e) => {
+      if ((e.target as Element).closest?.('button, input, select, summary')) return
+      this.selectionDragged = false
       down = true
       panning = false
       downX = lastX = e.clientX
@@ -273,6 +245,7 @@ export class Scene {
       if (!down) return
       if (!panning && Math.hypot(e.clientX - downX, e.clientY - downY) < PAN_THRESHOLD_PX) return
       panning = true
+      this.selectionDragged = true
       el.style.cursor = 'grabbing'
       this.applyView(panBy(this.view(), this.bounds(), e.clientX - lastX, e.clientY - lastY))
       lastX = e.clientX
@@ -328,8 +301,8 @@ export class Scene {
   }
 
   reset(numProcs: number): void {
+    this.setSelection(null)
     this.numProcs = numProcs
-    this.activeWalks = 0
     for (const rec of this.gophers.values()) rec.g.container.destroy()
     this.gophers.clear()
     for (const rec of this.threads.values()) rec.t.container.destroy()
@@ -337,10 +310,9 @@ export class Scene {
     this.buildStatics()
   }
 
-  // loadTimeline wires the per-run trace so the scene can fire the GC/steal cues
+  // loadTimeline wires the per-run trace so the scene can fire recorded STW cues
   // and reset its step-window tracking.
   loadTimeline(tl: Timeline): void {
-    this.events = tl.events
     this.midAlias = midAliases(tl.events)
     // A new run means new thread ids: drop stale carriers so their labels
     // never mix aliases across runs.
@@ -350,18 +322,37 @@ export class Scene {
     this.durationNs = tl.meta.durationNs
     this.lastT = -1
     this.stwFlash = 0
-    this.activeWalks = 0
-    this.stationGlow = this.stations.map(() => 0)
   }
 
-  setWorld(world: WorldState): void {
+  setWorld(world: WorldState, playing = false): void {
+    this.playbackActive = playing
     this.detectCues(world)
     this.place(world)
-    // departure board: the real (reconstructed) global-queue size.
-    this.backdrop.setGlobalCount(zoneTotals(world, this.numProcs).global)
+    this.drawSelection()
+    // Board: observed runnable count, with no claim about queue membership.
+    this.backdrop.setGlobalCount(zoneTotals(world).global)
     // GC yard: heap pile size from the real heap fill, robot/pulse from the mark phase.
     this.heapCount = heapTileCount(heapPct(world) ?? 0)
     this.gcMark = gcPhase(world).kind === 'mark'
+  }
+
+  setSelection(selection: ResourceSelection | null): void {
+    this.selection = selection
+    this.drawSelection()
+    this.hideTip()
+  }
+
+  private drawSelection(): void {
+    const graphics = this.selectionG
+    graphics.clear()
+    const s = this.selection
+    if (!s) return
+    const point = s.kind === 'p' ? this.stations[s.id]
+      : s.kind === 'g' ? this.gophers.get(s.id)?.g.container : this.threads.get(s.id)?.t.container
+    if (!point || (s.kind === 'm' && !this.showThreads)) return
+    if (s.kind === 'p') graphics.ellipse(point.x, point.y + 5, 38, 18)
+    else graphics.ellipse(point.x, point.y + 3, s.kind === 'g' ? 18 : 26, 10)
+    graphics.stroke({ color: PAL.teal, width: 2 })
   }
 
   toggleIds(): boolean {
@@ -380,7 +371,6 @@ export class Scene {
   private buildStatics(): void {
     this.stations = stationPositions(this.numProcs)
     this.occupied = this.stations.map(() => false)
-    this.stationGlow = this.stations.map(() => 0)
     this.stationsG.clear()
     for (const st of this.stations) {
       drawStation(this.stationsG, st.x, st.y)
@@ -412,19 +402,15 @@ export class Scene {
     this.applyView(clampView({ scale: s, x: b.viewW / 2 - cx * s, y: b.viewH / 2 - cy * s }, b))
   }
 
-  // detectCues looks at the playback step (lastT, t] for a stop-the-world pause and
-  // for reconstructed steal bursts, firing the brief vignette / station glow. Big
-  // jumps (scrubbing) are ignored so a seek doesn't spuriously flash.
+  // Flash only on forward playback, never when seeking.
   private detectCues(world: WorldState): void {
     const t = world.t
+    this.procStates = world.procs.map(p => p.status)
     this.occupied = this.stations.map((_, pid) => (world.procs[pid]?.gid ?? -1) >= 0)
-    // capture the step verdict before lastT is advanced — place() (which starts
-    // walks) runs after this and needs it.
-    this.stepPlayback = isPlaybackStep(this.lastT, t, this.durationNs)
+    // place() uses this verdict for the decorative exit poof.
+    this.stepPlayback = this.playbackActive && isPlaybackStep(this.lastT, t, this.durationNs)
     if (this.stepPlayback) {
       if (stwInWindow(this.gc, this.lastT, t)) this.stwFlash = 1
-      const burst = stealBurst(this.events, t, STEAL_LOOKBACK_NS)
-      if (burst && burst.pid < this.stationGlow.length) this.stationGlow[burst.pid] = 1
     }
     this.lastT = t
   }
@@ -432,20 +418,20 @@ export class Scene {
   private place(world: WorldState): void {
     const places = placeIso(world, this.numProcs)
     for (const [gid, p] of places) {
-      const existed = this.gophers.has(gid)
       let rec = this.gophers.get(gid)
       if (!rec) rec = this.spawn(gid, p.x, p.y)
       rec.dying = 0
       const v = world.goroutines.get(gid)!
       const prevState = rec.view?.state
 
-      // Data-driven walk (?walk): on a real live-state transition during playback,
-      // route a walk from the gopher's current spot to its new target. On a scrub/seek
-      // (not a playback step), drop any walk and snap via the normal lerp.
-      if (this.walksEnabled) this.maybeWalk(rec, existed, prevState, v.state, p.x, p.y)
-
       rec.tx = p.x
       rec.ty = p.y
+      // State locations change atomically with trace events. A running G must
+      // never type while still visually travelling from its previous zone.
+      rec.g.container.position.set(p.x, p.y)
+      rec.g.container.zIndex = p.y
+      rec.g.container.scale.set(1)
+      rec.g.setAlpha(1)
       if (rec.scale !== p.scale) {
         rec.scale = p.scale
         rec.g.setScale(p.scale)
@@ -456,12 +442,11 @@ export class Scene {
     }
     // gophers no longer placed: dead ones poof out (tick), the rest removed.
     for (const [gid, rec] of this.gophers) {
-      if (places.has(gid) || rec.dying > 0) continue
-      if (world.goroutines.get(gid)?.state === 'dead') {
-        rec.dying = POOF_MS
+      if (places.has(gid)) continue
+      if (this.stepPlayback && world.goroutines.get(gid)?.state === 'dead') {
+        if (rec.kind !== 'dead') rec.dying = POOF_MS
         rec.kind = 'dead'
       } else {
-        this.endWalk(rec)
         rec.g.container.destroy()
         this.gophers.delete(gid)
       }
@@ -475,6 +460,7 @@ export class Scene {
       if (!rec) rec = this.spawnThread(mid, p.x, p.y)
       rec.tx = p.x
       rec.ty = p.y
+      rec.t.container.position.set(p.x, p.y)
       if (rec.scale !== p.scale) {
         rec.scale = p.scale
         rec.t.setScale(p.scale)
@@ -486,32 +472,6 @@ export class Scene {
       rec.t.container.destroy()
       this.threads.delete(mid)
     }
-  }
-
-  // maybeWalk starts a routed walk on a real live-state transition (playback only),
-  // or drops a stale walk on a scrub/seek. Only the 4 live states walk — dead poofs
-  // and fresh spawns just appear. Capped by MAX_WALKS so a burst degrades to lerp.
-  private maybeWalk(rec: Rec, existed: boolean, prev: GState | undefined, next: GState, tx: number, ty: number): void {
-    if (!this.stepPlayback) {
-      this.endWalk(rec)
-      return
-    }
-    if (!existed || this.stwFlash > 0 || next === prev) return
-    const kind = walkKind(prev, next)
-    if (!kind || kind === 'spawn' || kind === 'toDead') return
-    const from = { x: rec.g.container.x, y: rec.g.container.y }
-    const dist = Math.hypot(tx - from.x, ty - from.y)
-    if (dist < MIN_WALK_DIST || this.activeWalks >= MAX_WALKS) return
-    const path = buildPath(from, { x: tx, y: ty }, kind, WALK_CONSTS)
-    if (!rec.walk) this.activeWalks++
-    rec.walk = { path, elapsed: 0, dur: walkDuration(path.len), hop: isHop(path) }
-  }
-
-  private endWalk(rec: Rec): void {
-    if (!rec.walk) return
-    rec.walk = undefined
-    rec.g.setFacing(1)
-    this.activeWalks = Math.max(0, this.activeWalks - 1)
   }
 
   private spawn(gid: number, x: number, y: number): Rec {
@@ -528,6 +488,9 @@ export class Scene {
     c.on('pointerover', (e: FederatedPointerEvent) => this.showTip(gid, e))
     c.on('pointermove', (e: FederatedPointerEvent) => this.positionTip(e))
     c.on('pointerout', () => this.hideTip())
+    c.on('pointertap', () => {
+      if (!this.selectionDragged) this.onSelect?.({ kind: 'g', id: gid })
+    })
 
     this.gopherLayer.addChild(c)
     const rec: Rec = { g, tx: x, ty: y, scale: 1, kind: 'runnable', phase: (gid % 17) * 0.37, dying: 0 }
@@ -550,6 +513,9 @@ export class Scene {
     c.on('pointerover', (e: FederatedPointerEvent) => this.showThreadTip(mid, e))
     c.on('pointermove', (e: FederatedPointerEvent) => this.positionTip(e))
     c.on('pointerout', () => this.hideTip())
+    c.on('pointertap', () => {
+      if (!this.selectionDragged) this.onSelect?.({ kind: 'm', id: mid })
+    })
 
     this.gopherLayer.addChild(c) // same layer: one depth-sort domain with the gophers
     const rec: TRec = { t, tx: x, ty: y, scale: 1, phase: (mid % 7) * 0.5, tip: '' }
@@ -558,34 +524,26 @@ export class Scene {
   }
 
   private tick(dtMs: number): void {
-    const k = 1 - Math.pow(0.0015, dtMs / 1000)
-    this.animT += dtMs / 1000
+    if (this.playbackActive && !this.reducedMotion) this.animT += dtMs / 1000
     if (this.stwFlash > 0) this.stwFlash = Math.max(0, this.stwFlash - dtMs / STW_FLASH_MS)
     this.stwOverlay.alpha = this.stwFlash * 0.45
     this.stwOverlay.visible = this.stwFlash > 0
 
-    const frozen = this.stwFlash > 0
-    // structures (belt/fan/heap/robot) latch to a frozen clock during STW so the
-    // world truly stops with the vignette; the siren keeps flashing.
-    if (!frozen) this.frozenAnimT = this.animT
-    const aT = frozen ? this.frozenAnimT : this.animT
+    // STWStart precedes the last stopped P; STWDone follows restarting Ps.
+    // The recorded interval cannot establish that every G is frozen throughout.
+    const aT = this.animT
 
-    // fx layer: conveyor belts + booth fans/steam + idle-P markers + steal glows,
-    // then the central GC yard (heap pile + cleaning robot + siren).
     this.fxG.clear()
     for (let pid = 0; pid < this.stations.length; pid++) {
       const st = this.stations[pid]
       drawBelt(this.fxG, st.x, st.y, aT)
-      if (!this.occupied[pid]) drawIdleMarker(this.fxG, st.x, st.y)
+      if (!this.occupied[pid] && this.procStates[pid] === 'idle') drawIdleMarker(this.fxG, st.x, st.y)
       drawBoothFx(this.fxG, st.x, st.y, this.occupied[pid], aT)
-      if (this.stationGlow[pid] > 0) {
-        this.stationGlow[pid] = Math.max(0, this.stationGlow[pid] - dtMs / GLOW_MS)
-        drawStationGlow(this.fxG, st.x, st.y, this.stationGlow[pid])
-      }
+
     }
-    const bot = botTarget(this.gcMark && !frozen, aT, HEAP_CENTER, BOT_DOCK)
-    drawHeapPile(this.fxG, HEAP_CENTER, this.heapCount, this.gcMark, frozen, aT, bot)
-    drawRobot(this.fxG, bot.x, bot.y, bot.sweeping, frozen, this.animT)
+    const bot = botTarget(this.gcMark, aT, HEAP_CENTER, BOT_DOCK)
+    drawHeapPile(this.fxG, HEAP_CENTER, this.heapCount, this.gcMark, false, aT, bot)
+    drawRobot(this.fxG, bot.x, bot.y, bot.sweeping, false, this.animT)
     drawSiren(this.fxG, SIREN_POS.x, SIREN_POS.y, this.stwFlash, this.animT)
 
     for (const [gid, rec] of this.gophers) {
@@ -606,49 +564,22 @@ export class Scene {
         continue
       }
 
-      // active routed walk (?walk): follow the path with facing + a gait; on arrival
-      // hand back to the lerp. Paused (skipped) while frozen so the world truly stops.
-      if (rec.walk && !frozen) {
-        const wk = rec.walk
-        wk.elapsed += dtMs
-        const p = wk.elapsed / wk.dur
-        if (p >= 1) {
-          c.x = rec.tx
-          c.y = rec.ty
-          this.endWalk(rec)
-          this.applyMotion(rec, frozen)
-          rec.g.setTexture(this.frameFor(rec))
-        } else {
-          const s = walkAt(wk.path, p)
-          c.x = s.x
-          c.y = s.y
-          if (s.dx !== 0) rec.g.setFacing(s.dx < 0 ? -1 : 1)
-          const bob = wk.hop
-            ? -Math.sin(Math.PI * p) * 9 // short move → a little hop arc
-            : -Math.abs(Math.sin(this.animT * 11 + rec.phase)) * 1.4 // stroll → gentle gait
-          rec.g.setOffset(0, bob)
-          rec.g.setTexture(this.tex.walk[Math.floor(this.animT * WALK_FPS + rec.phase) % this.tex.walk.length])
-        }
-        c.zIndex = c.y
-        continue
-      }
-
-      // ease toward target position; depth-sort by screen-y
-      c.x += (rec.tx - c.x) * k
-      c.y += (rec.ty - c.y) * k
+      // Event-aligned positions; depth-sort by screen-y
+      c.x = rec.tx
+      c.y = rec.ty
       c.zIndex = c.y
 
-      this.applyMotion(rec, frozen)
-      rec.g.setTexture(frozen ? this.tex.frozen : this.frameFor(rec))
+      this.applyMotion(rec)
+      rec.g.setTexture(this.frameFor(rec))
     }
 
     for (const rec of this.threads.values()) {
       const c = rec.t.container
-      c.x += (rec.tx - c.x) * k
-      c.y += (rec.ty - c.y) * k
+      c.x = rec.tx
+      c.y = rec.ty
       c.zIndex = c.y - 0.5 // just under its gopher when they overlap exactly
       const i = Math.floor(this.animT * THREAD_BLINK_FPS + rec.phase) % this.ttex.idle.length
-      rec.t.setTexture(frozen ? this.ttex.frozen : this.ttex.idle[i])
+      rec.t.setTexture(this.ttex.idle[i])
     }
   }
 
@@ -660,11 +591,7 @@ export class Scene {
     return frames[i]
   }
 
-  private applyMotion(rec: Rec, frozen: boolean): void {
-    if (frozen) {
-      rec.g.setOffset(0, 0)
-      return
-    }
+  private applyMotion(rec: Rec): void {
     const tphase = this.animT + rec.phase
     switch (rec.kind) {
       case 'running':
@@ -714,7 +641,6 @@ function formatTip(gid: number, view: GoroutineView, midAlias?: number): string 
   else if ((view.state === 'running' || view.state === 'syscall') && view.pid >= 0) s += ` (P${view.pid})`
   if ((view.state === 'running' || view.state === 'syscall') && view.mid >= 0)
     s += ` · M${midAlias ?? view.mid}`
-  if (view.stolen && view.state === 'running') s += tr().scene.stolenTip
   return s
 }
 

@@ -7,22 +7,29 @@
 
 ### ▶ [Open the live demo](https://puddiy.github.io/go-scheduler-live/) — nothing to install
 
-An educational, pixel-art visualization of the **real** Go runtime scheduler: goroutines (G) as gophers, execution slots (P) as isometric stations, OS threads (M) as numbered carriers — plus the garbage collector, live heap, work stealing, blocking syscalls and stop-the-world pauses.
+An educational, pixel-art visualization of the **real** Go runtime scheduler: goroutines (G) as gophers, execution slots (P) as isometric stations, OS threads (M) as numbered carriers — plus the garbage collector, allocated heap objects, CPU scheduling, blocking syscalls and stop-the-world pauses.
 
 ![Go Scheduler Live screenshot](docs/screenshot.png)
 
 ## The source of truth is the real runtime
 
-This is **not a simulation**. The backend runs curated Go workloads in a subprocess under [`runtime/trace`](https://pkg.go.dev/runtime/trace), parses the binary trace with [`golang.org/x/exp/trace`](https://pkg.go.dev/golang.org/x/exp/trace), and normalizes it into a timeline the frontend replays on a virtual clock. Every event you see — goroutine state transitions, P and M bindings, GC cycles, sub-millisecond STW durations, heap metrics, block reasons — comes from an actual trace of an actual Go program that ran on your machine seconds ago.
+This is **not a simulation**. The backend runs curated Go workloads in a subprocess under [`runtime/trace`](https://pkg.go.dev/runtime/trace), parses the binary trace with [`golang.org/x/exp/trace`](https://pkg.go.dev/golang.org/x/exp/trace), and normalizes it into a timeline the frontend replays on a virtual clock. Every event you see — goroutine state transitions, P and M bindings, mark phases, runtime STW intervals, heap metrics, block reasons — comes from a recorded Go execution. Local runs record new parameter combinations and cache repeats; the hosted demo replays recordings made in CI.
 
-Where the trace does not record something (local run-queue membership, steals, M lifecycle), the world reconstructs it honestly: reconstructions are marked `(reconstr.)` in tooltips and the log, and the always-visible **Assumptions** panel under the legend lists exactly what is stylized and what is fact.
+Queue membership, individual steals, runnext and parked-M lifecycle are unknown.
+Runnable Gs are shown without assigning them to queues. The **Assumptions**
+disclosure lists drawing limits, time scaling and omitted internals. Initial
+states and partial ranges are preserved without inventing their start times.
+See the [fidelity audit](docs/fidelity-audit.md).
+The [Superdesign workflow](docs/superdesign.md) documents the canvas and local UI context.
 
 ## Features
 
-- **Six curated scenarios** — work stealing, channel ping-pong, GC pressure, blocking syscalls (M handoff by sysmon), hot mutex contention, goroutine leak — each traced live with your `GOMAXPROCS` and goroutine count.
-- **Real OS threads (M).** The trace carries the executing thread id on every event; carriers dock at P stations and leave with their goroutine into blocking syscalls. Watch sysmon retake a P from a kernel-stuck M.
-- **Real GC.** A to-scale GC strip (concurrent-mark bands + STW ticks), per-frame heap bar colored by GC phase, and an STW flash that reports the honest pause duration (microseconds, not the stretched animation).
-- **Event log with causality** — every trace event with who-woke-whom, wait/run/kernel durations, syscall-return-without-P and sysmon-retake correlation, derived strictly from trace facts.
+- **G/M/P inspector** — click a resource or use the keyboard picker to see its observed state, bindings and recent normalized trace events. M shows its real ThreadID; syscall origin P is distinct from current ownership. Back/Step navigate complete timestamp groups.
+
+- **Six curated scenarios** — CPU scheduling, channel ping-pong, GC pressure, blocking syscalls (recorded P handoff), hot mutex contention, goroutine leak — each traced live with your `GOMAXPROCS` and goroutine count.
+- **Real OS threads (M).** The trace carries the executing thread id on every event; carriers dock at P stations and leave with their goroutine into blocking syscalls. P release and acquisition are shown separately without inferring the initiator.
+- **Real GC.** A to-scale GC strip (concurrent-mark bands + STW ticks), heap bar for allocated objects / soft GC goal, including ratios above 100%, and an STW flash that reports the honest pause duration (microseconds, not the stretched animation).
+- **Event log with causality** — every trace event with who-woke-whom, wait/run/syscall durations, lower bounds for initial states and syscall-to-Runnable transitions, derived strictly from trace facts.
 - **floor796-style zoom & pan** — wheel to zoom up to 6×, goroutine id tags re-rasterize and stay crisp.
 - **RU/EN interface** — a header toggle switches the whole UI, including captions and the event log.
 - **Shareable URLs** — scenario, parameters and the paused playhead moment encode into the address bar.
@@ -32,10 +39,10 @@ Where the trace does not record something (local run-queue membership, steals, M
 
 | Scenario | What it teaches |
 |---|---|
-| Work stealing | With `GOMAXPROCS>1`, idle Ps steal goroutines from busy ones |
+| CPU scheduling | Runnable Gs execute across Ps; ordinary trace does not identify individual steals |
 | Channels (ping-pong) | A ring of goroutines passes tokens; most wait on `chan receive` |
 | GC pressure | Fast allocation drives GC cycles: concurrent mark + stop-the-world |
-| Blocking syscalls ¹ | The M blocks in the kernel with its G; sysmon retakes the P for another M |
+| Blocking syscalls ¹ | Blocking read on M; recorded P release and acquisition by another M |
 | Hot mutex | One `sync.Mutex` serializes N workers no matter how many Ps exist |
 | Goroutine leak | Goroutines block forever on a channel nobody writes to; Waiting only grows |
 
@@ -64,7 +71,7 @@ For package boundaries, the `mid` binding rules, what is real versus reconstruct
 
 ## Quick start
 
-Prerequisites: **Go 1.25+**, **Node 20+**.
+Prerequisites: **Go 1.25+**, **Node 22.12+ or 24+**.
 
 ```bash
 # backend (terminal 1)
@@ -76,7 +83,7 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5173. Each **Run** records a fresh trace of the selected scenario.
+Open http://localhost:5173. A new parameter combination records a trace; repeating it replays the in-memory cache.
 
 If :8080 is already taken on your machine, move the backend and point the dev proxy at it: `go run ./cmd/server -addr :8085` with `GMP_API_TARGET=http://localhost:8085 npm run dev`.
 
@@ -97,13 +104,19 @@ The same pipeline deploys to GitHub Pages on every push to `main` (`.github/work
 go test ./...                     # scheduler invariants incl. M bindings, scenario anti-regressions
 cd web && npx vitest run          # pure logic: state, GC, layout, causality, share codec, viewport, i18n
 node scripts/verify-controls.mjs  # Playwright: 38-point control contract (needs both servers running)
+node scripts/verify-inspector.mjs # Playwright: resource selection, event history, keyboard and responsive inspector
 ```
 
 > The backend compiles and runs the workload on demand (`go run`), so it needs the Go toolchain and this module's source at runtime. It is a local teaching tool — **do not expose the dev server publicly.**
 
 ## Honesty notes
 
-The in-app **Assumptions** panel is the authoritative list. In short: queue membership and steals are reconstructions (marked as such), time is slowed thousands of times, a P lane shows 6 goroutines instead of the real 256-slot queue, `runnext` is not drawn, GC sweep/mark-assist and the mark workers' ~25% CPU are omitted, parked M's are invisible because the trace has no M lifecycle. Everything else is real trace data.
+The **Assumptions** disclosure is the authoritative list. Queue internals and
+steals remain unknown; render caps limit sprites, never counts. GOMAXPROCS comes
+from its recorded metric. STW intervals include stopping/restarting coordination
+and do not force every G into a frozen pose. Mark counts include complete phases
+only. Heap metrics are downsampled, and the heap goal is soft. Decorative poses,
+factory scenery and the 90-second playback scale are explained in the UI.
 
 ## Contributing
 
@@ -129,9 +142,8 @@ versus a mutex); prebuilding the workload binary instead of `go run` per request
 something that shows a blocking syscall on Windows, where the current scenario
 cannot run.
 
-**Maybe** — drawing heap overshoot, since the GC goal is soft and the real heap
-can exceed it; showing the ~25% CPU that background mark workers take; reworking
-the steal heuristic to cut its false positives; extracting the trace → Timeline
+**Maybe** — additional trace-backed runtime measurements, including
+background mark workers’ CPU usage; extracting the trace → Timeline
 pipeline as a library other tools could use.
 
 **Not planned** — a public instance that records live traces. See the

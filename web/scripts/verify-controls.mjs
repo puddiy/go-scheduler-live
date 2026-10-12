@@ -169,7 +169,7 @@ ok('assumptions line stays visible in Learn mode', await page.locator('.assumpti
 const assume = page.locator('.assumptions summary')
 await assume.click()
 ok('assumptions panel opens', await page.locator('.assumptions').evaluate((e) => e.open))
-ok('assumptions list the reconstruction caveat', /реконструкц/i.test(await page.locator('.assume-body').textContent()))
+ok('assumptions disclose unobservable queues and stealing', /Work stealing нельзя/.test(await page.locator('.assume-body').textContent()))
 // Closing is cleanup, not a control under test. Expanding the panel resizes the
 // stage, which relays out the Pixi canvas, so a click here waits for the summary
 // to stop moving — a wait a slow machine loses. Set the state directly instead.
@@ -184,7 +184,7 @@ ok('scenario change runs automatically', (await state()).scenario === 'gcpressur
 ok('intro card reappears for the new scenario', await page.locator('.intro').isVisible())
 await page.locator('.intro button', { hasText: 'Понятно' }).click().catch(() => {})
 const gcReadout = await page.locator('.gc-readout').textContent()
-ok('GC readout shows real cycles', /цикл/.test(gcReadout), gcReadout)
+ok('GC readout shows complete mark phases', /\d+ фаз mark/.test(gcReadout), gcReadout)
 // the DOM GC-strip was replaced by the unified timeline canvas; assert STW from the
 // real trace data + that the timeline canvas is present.
 const stwCount = await page.evaluate(() =>
@@ -206,11 +206,7 @@ const panelHiddenBefore = !(await page.locator('.upload-panel').isVisible())
 await customChip.click()
 const panelVisibleAfter = await page.locator('.upload-panel').isVisible()
 ok('custom-trace chip opens the upload panel', panelHiddenBefore && panelVisibleAfter)
-// No close affordance exists in the UI (it only hides itself on a successful
-// upload or a scenario switch, neither of which happens here), and leaving it
-// open would sit on top of the canvas for the STW screenshot in check 10 —
-// so hide it directly, the same way check 7e closes the assumptions panel.
-await page.locator('.upload-panel').evaluate((e) => { e.style.display = 'none' })
+await page.locator('.upload-close').click()
 
 // 9. GOMAXPROCS change + run
 await page.evaluate(() => {
@@ -284,4 +280,4 @@ const failed = results.filter((r) => !r.pass)
 console.log(`\n${results.length - failed.length}/${results.length} passed`)
 console.log('console errors:', errors.length ? errors : 'none')
 await browser.close()
-process.exit(failed.length ? 1 : 0)
+process.exit(failed.length || errors.length ? 1 : 0)

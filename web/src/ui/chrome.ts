@@ -6,7 +6,7 @@ import { stationPositions, type Pt } from '../scene/iso'
 import { GLOBAL, WAITING, SYSCALL, CAPS, zoneTotals, midAliases } from '../scene/layout'
 import { narrate, captionWindowNs } from '../player/narrate'
 import { gcSummary, stwInWindow, isPlaybackStep, STW_FLASH_MS, type GcSummary } from '../player/gc'
-import { gcPhase, heapPct, waitingBreakdown } from './derive'
+import { gcPhase, heapPct, waitingBreakdown, schedulerCounts } from './derive'
 import { t as tr, getLang, setLang, scenarioDesc } from '../i18n'
 import { isStaticDemo } from '../api'
 
@@ -17,7 +17,7 @@ import { isStaticDemo } from '../api'
 // caption (narrate), the waiting-reasons breakdown, and a brief stop-the-world
 // banner that reports the real pause duration. Pure derivations live in ./derive.
 
-type ZoneKey = 'pstation' | 'local' | 'global' | 'waiting' | 'syscall'
+type ZoneKey = 'pstation' | 'global' | 'waiting' | 'syscall'
 
 // Legend colors, zipped with the localized [name, tip] pairs from the i18n dict
 // (same order); each entry carries a hover tip so the jargon is teachable in place.
@@ -55,6 +55,10 @@ export class Chrome {
   private stwBannerMs = 0 // wall-clock ms remaining to hold the STW banner after a sub-frame pause
   private lastNowMs = 0 // performance.now() at the previous update, for framerate-independent decay
 
+  private procPills: HTMLButtonElement[] = []
+  onSelectProc?: (pid: number) => void
+  private readonly statCounts: HTMLSpanElement[] = []
+  private readonly procCount: HTMLSpanElement
   private readonly subtitle: HTMLSpanElement
   private readonly gcDot: HTMLSpanElement
   private readonly gcLabel: HTMLSpanElement
@@ -72,19 +76,22 @@ export class Chrome {
 
   private last = { gc: '', heap: -1, wait: '', cap: '', readout: '', over: '' }
 
-  constructor(stage: HTMLElement) {
+  constructor(private readonly stage: HTMLElement) {
     // --- header top row: title + scenario subtitle + GC indicator + heap bar ---
     const S = tr()
     const title = el('div', 'title')
     title.append(S.chrome.titleMain, el('span', 'accent', S.chrome.titleAccent))
+    const identity = el('div', 'identity-row')
+    identity.append(title, el('span', 'trace-source', S.chrome.source))
     this.subtitle = el('span', 'subtitle', S.chrome.subtitleDefault)
     const titleWrap = el('div', 'title-wrap')
-    titleWrap.append(title, this.subtitle)
+    titleWrap.append(identity, this.subtitle)
 
     // language switcher: strings are baked at construction time all over the
     // chrome/controls, so switching simply persists the choice and reloads.
     const langBtn = el('button', 'lang-btn', S.chrome.langBtn)
     langBtn.title = S.chrome.langTip
+    langBtn.setAttribute('aria-label', S.chrome.langTip)
     langBtn.addEventListener('click', () => {
       setLang(getLang() === 'ru' ? 'en' : 'ru')
       location.reload()
@@ -111,6 +118,7 @@ export class Chrome {
     // instead handles its own click inline because it has no external state).
     this.presentBtn = el('button', 'present-btn', '⛶')
     this.presentBtn.title = S.present.enterTip
+    this.presentBtn.setAttribute('aria-label', S.present.enterTip)
 
     const topRow = el('div', 'chrome-head')
     topRow.append(titleWrap, el('div', 'spacer'), gc, heap, langBtn, this.presentBtn)
@@ -119,7 +127,21 @@ export class Chrome {
     // unified control-panel timeline (ui/timeline.ts); the header keeps only the GC
     // phase indicator + heap bar + cycle readout.
     this.header = el('header', 'chrome-header')
-    this.header.append(topRow)
+    const stats = el('div', 'runtime-stats')
+    stats.title = S.chrome.statsTip
+    stats.append(el('span', 'runtime-stats-title', S.chrome.snapshot))
+    const states = ['running', 'runnable', 'waiting', 'syscall'] as const
+    for (const [i, state] of states.entries()) {
+      const item = el('div', 'runtime-stat')
+      item.dataset.state = state
+      const count = el('span', 'runtime-stat-count', '0')
+      this.statCounts.push(count)
+      item.append(count, el('span', 'runtime-stat-label', S.chrome.stats[i]))
+      stats.append(item)
+    }
+    this.procCount = el('span', 'runtime-procs', '')
+    stats.append(this.procCount)
+    this.header.append(topRow, stats)
 
     // --- legend ---
     this.legend = el('div', 'chrome-legend')
@@ -143,6 +165,7 @@ export class Chrome {
     const pill = (key: ZoneKey, text: string, color: string, center: boolean, tip: string): HTMLDivElement => {
       const e = el('div', center ? 'zone-pill center' : 'zone-pill')
       e.style.color = color
+      e.dataset.zone = key
       e.title = tip
       e.append(document.createTextNode(text))
       const ov = el('span', 'zone-over')
@@ -156,7 +179,6 @@ export class Chrome {
     waiting.append(this.waitSub)
     this.pills = {
       pstation: pill('pstation', S.pills.pstation[0], PAL.running, true, S.pills.pstation[1]),
-      local: pill('local', S.pills.local[0], PAL.runnable, true, S.pills.local[1]),
       global: pill('global', S.pills.global[0], PAL.runnable, true, S.pills.global[1]),
       waiting,
       syscall: pill('syscall', S.pills.syscall[0], PAL.syscall, true, S.pills.syscall[1]),
@@ -180,6 +202,17 @@ export class Chrome {
 
   setProcs(n: number): void {
     this.numProcs = n
+    for (const pill of this.procPills) pill.remove()
+    this.procPills = stationPositions(n).map((_, pid) => {
+      const pill = el('button', 'zone-pill center proc-pill')
+      pill.type = 'button'
+      pill.setAttribute('aria-label', `${tr().inspector.open}: P${pid}`)
+      pill.addEventListener('click', () => this.onSelectProc?.(pid))
+      pill.dataset.pid = String(pid)
+      pill.append(el('b', undefined, `P${pid}`), el('span', 'proc-state', ''))
+      this.stage.append(pill)
+      return pill
+    })
     this.anchors = this.computeAnchors()
     this.layout()
   }
@@ -241,6 +274,13 @@ export class Chrome {
   layout(): void {
     const scene = this.scene
     if (!scene) return
+    for (const [pid, station] of stationPositions(this.numProcs).entries()) {
+      const pill = this.procPills[pid]
+      if (!pill) continue
+      const p = scene.worldToScreen({ x: station.x, y: station.y + 24 })
+      pill.style.left = `${p.x}px`
+      pill.style.top = `${p.y}px`
+    }
     for (const key of Object.keys(this.pills) as ZoneKey[]) {
       const p = scene.worldToScreen(this.anchors[key])
       const e = this.pills[key]
@@ -249,7 +289,19 @@ export class Chrome {
     }
   }
 
-  update(world: WorldState): void {
+  update(world: WorldState, playing = false): void {
+    for (const p of world.procs) {
+      const pill = this.procPills[p.pid]
+      if (!pill) continue
+      const status = p.status ?? 'unknown'
+      pill.dataset.state = status
+      const label = tr().chrome.procStates[status]
+      pill.querySelector('.proc-state')!.textContent = ` · ${label}`
+      pill.title = `P${p.pid} · ${label}${p.mid >= 0 ? ` · M${this.midAlias.get(p.mid) ?? p.mid}` : ''}`
+    }
+    const counts = schedulerCounts(world)
+    for (const [i, count] of Object.values(counts).entries()) this.statCounts[i].textContent = String(count)
+    this.procCount.textContent = world.gomaxprocs !== undefined ? `GOMAXPROCS ${world.gomaxprocs}` : `${world.procs.length} P`
     const gc = gcPhase(world)
     const hp = heapPct(world)
 
@@ -258,7 +310,7 @@ export class Chrome {
     const pct = hp === null ? -1 : Math.round(hp * 100)
     if (pct !== this.last.heap || gc.label !== this.last.gc) {
       this.last.heap = pct
-      this.heapFill.style.width = hp === null ? '0%' : `${pct}%`
+      this.heapFill.style.width = hp === null ? '0%' : `${Math.min(100, pct)}%`
       this.heapFill.style.background = hp === null ? PAL.txDim : gc.color
       this.heapPctEl.textContent = hp === null ? '—' : `${pct}%`
     }
@@ -288,7 +340,7 @@ export class Chrome {
     const deltaMs = this.lastNowMs ? nowMs - this.lastNowMs : 0
     this.lastNowMs = nowMs
     let stwNs = 0
-    if (isPlaybackStep(this.lastT, t, dur)) {
+    if (playing && isPlaybackStep(this.lastT, t, dur)) {
       const stw = stwInWindow(this.gc, this.lastT, t)
       if (stw) {
         stwNs = stw.ns
@@ -296,6 +348,7 @@ export class Chrome {
       }
     }
     this.lastT = t
+    if (!playing) this.stwBannerMs = 0
     if (this.stwBannerMs > 0) this.stwBannerMs = Math.max(0, this.stwBannerMs - deltaMs)
 
     // caption: a fresh STW gets the spotlight with its real µs; otherwise narrate,
@@ -310,6 +363,7 @@ export class Chrome {
       this.caption.textContent = cap
       this.caption.style.display = cap ? 'block' : 'none'
     }
+    if (stwNs > 0) this.banner.textContent = tr().chrome.banner(fmtNs(stwNs))
     const showBanner = this.stwBannerMs > 0
     if (showBanner !== (this.banner.style.display === 'block')) {
       this.banner.style.display = showBanner ? 'block' : 'none'
@@ -325,10 +379,8 @@ export class Chrome {
       this.waitSub.style.display = wait ? 'block' : 'none'
     }
 
-    // "+N" badges beyond the render caps. Local queues never carry a "+N": once a
-    // P's lane is full the surplus spills into the global queue (zoneTotals.global),
-    // which mirrors the real runtime overflowing a full local runq.
-    const tot = zoneTotals(world, this.numProcs)
+    // "+N" counts sprites hidden by drawing caps, independently of queue internals.
+    const tot = zoneTotals(world)
     const globalOver = Math.max(0, tot.global - CAPS.global)
     const waitOver = Math.max(0, tot.waiting - CAPS.waiting)
     const sysOver = Math.max(0, tot.syscall - CAPS.syscall)
@@ -350,7 +402,6 @@ export class Chrome {
     const topY = Math.min(...st.map((p) => p.y))
     return {
       pstation: { x: cx, y: topY - 46 },
-      local: { x: cx, y: topY + 40 },
       global: { x: GLOBAL.x + GLOBAL.w / 2, y: GLOBAL.y - 14 },
       waiting: { x: WAITING.x + WAITING.w / 2, y: WAITING.y - 14 },
       syscall: { x: SYSCALL.x + SYSCALL.w / 2, y: SYSCALL.y - 14 },

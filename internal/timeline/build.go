@@ -3,13 +3,16 @@ package timeline
 import "sort"
 
 // Build assembles a Timeline from normalized events. It sorts events by time,
-// reconstructs the work-stealing flag, and fills metadata. NumProcs is taken
-// from the caller (the authoritative GOMAXPROCS the workload ran with), not
-// inferred from the trace.
+// fills metadata without inventing scheduler internals. NumProcs reserves
+// capacity for the configured count, observed P IDs and recorded GOMAXPROCS.
 func Build(events []Event, gomaxprocs int, scenario string) Timeline {
 	sort.SliceStable(events, func(i, j int) bool { return events[i].T < events[j].T })
 
-	reconstructSteals(events)
+	// Older payloads carried a steal heuristic. Ordinary traces cannot prove
+	// queue membership or a steal; never propagate that claim.
+	for i := range events {
+		events[i].Stolen = false
+	}
 
 	var (
 		gids     []int64
@@ -32,7 +35,7 @@ func Build(events []Event, gomaxprocs int, scenario string) Timeline {
 	return Timeline{
 		Meta: Meta{
 			Scenario:   scenario,
-			NumProcs:   gomaxprocs,
+			NumProcs:   max(gomaxprocs, ObservedProcs(events)),
 			DurationNs: duration,
 			Goroutines: gids,
 		},
@@ -41,14 +44,18 @@ func Build(events []Event, gomaxprocs int, scenario string) Timeline {
 }
 
 // ObservedProcs returns 1 + the highest P id that appears in the events, i.e.
-// the number of Ps the traced program actually used. The trace does not record
-// GOMAXPROCS, so this is a lower bound, not the flag value.
+// capacity needed to display every observed P and recorded GOMAXPROCS value.
+// Without the metric it remains a lower bound.
 func ObservedProcs(events []Event) int {
 	var (
 		maxPID int64 = -1
 		found  bool
 	)
 	for _, e := range events {
+		if e.Type == EventMetric && e.Name == "/sched/gomaxprocs:threads" && e.Value > 0 {
+			maxPID = max(maxPID, int64(e.Value)-1)
+			found = true
+		}
 		if e.PID == NoResource {
 			continue
 		}
@@ -61,29 +68,4 @@ func ObservedProcs(events []Event) int {
 		return 0
 	}
 	return int(maxPID) + 1
-}
-
-// reconstructSteals sets Stolen on g_run_start events whose goroutine last
-// became runnable on a different P than the one it now runs on.
-//
-// This is a heuristic, NOT a fact from the trace: the runtime records neither
-// local run-queue membership nor steals directly. We approximate by remembering,
-// per goroutine, the P seen when it was created or unblocked, and flag a run
-// start on a different P. At unblock that P is the *unblocker's* P, so the signal
-// is rough — which is exactly why it is surfaced as a reconstruction flag.
-func reconstructSteals(events []Event) {
-	lastRunnableProc := map[int64]int64{}
-	for i := range events {
-		e := &events[i]
-		switch e.Type {
-		case EventGCreate, EventGUnblock:
-			lastRunnableProc[e.GID] = e.PID
-		case EventGRunStart:
-			prev, ok := lastRunnableProc[e.GID]
-			if ok && prev != NoResource && e.PID != NoResource && e.PID != prev {
-				e.Stolen = true
-			}
-			lastRunnableProc[e.GID] = e.PID
-		}
-	}
 }

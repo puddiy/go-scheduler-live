@@ -25,39 +25,17 @@ describe('placeIso', () => {
     expect(p.get(1)).toEqual({ x: st.x, y: st.y, scale: 1 })
   })
 
-  it('stacks two runnables of the same P at distinct spots below it', () => {
-    const p = placeIso(
-      world([
-        { gid: 1, state: 'runnable', pid: 0, mid: -1, stolen: false },
-        { gid: 2, state: 'runnable', pid: 0, mid: -1, stolen: false },
-      ]),
-      4,
-    )
-    const st = stationPositions(4)[0]
-    expect(p.get(1)).not.toEqual(p.get(2))
-    expect(p.get(1)!.y).toBeGreaterThan(st.y) // toward the viewer
+  it('places runnable Gs in one pool without assigning invented local queues', () => {
+    const w = world(runnables(8, 0))
+    const p = placeIso(w, 4)
+    expect([...p.values()].every(q => inRect(q, GLOBAL))).toBe(true)
+    expect(new Set([...p.values()].map(q => `${q.x},${q.y}`)).size).toBe(8)
   })
 
-  it('distributes many runnables across all P local queues (no single pile)', () => {
-    // 8 runnables all reporting pid 0 must still spread across the 4 stations,
-    // not pile under P0 — local-queue membership is reconstructed, so we balance.
-    const p = placeIso(world(runnables(8, 0)), 4)
-    const stationXs = new Set(stationPositions(4).map((s) => s.x))
-    const usedColumns = new Set<number>()
-    for (const gid of [1, 2, 3, 4, 5, 6, 7, 8]) {
-      // each placement sits near a station x (local lane is offset a few px)
-      const px = p.get(gid)!.x
-      const nearest = [...stationXs].reduce((a, b) => (Math.abs(b - px) < Math.abs(a - px) ? b : a))
-      usedColumns.add(nearest)
-    }
-    expect(usedColumns.size).toBe(4) // all four Ps got a local queue
-  })
-
-  it('overflows runnables beyond local caps into the global queue', () => {
-    const total = CAPS.local * 4 + 5
-    const p = placeIso(world(runnables(total, NO_RESOURCE)), 4)
-    const inGlobal = [...p.values()].filter((q) => inRect(q, GLOBAL))
-    expect(inGlobal.length).toBeGreaterThan(0)
+  it('caps the runnable drawing without changing its real count', () => {
+    const w = world(runnables(CAPS.global + 12, NO_RESOURCE))
+    expect(placeIso(w, 4).size).toBe(CAPS.global)
+    expect(zoneTotals(w).global).toBe(CAPS.global + 12)
   })
 
   it('renders zone (waiting/syscall) gophers at reduced scale so they do not overlap', () => {
@@ -79,22 +57,13 @@ describe('placeIso', () => {
     expect(p.has(3)).toBe(false)
   })
 
-  it('homes all runnables to P0 when numProcs=1, spilling past the cap to global', () => {
-    const p = placeIso(world(runnables(CAPS.local + 3, NO_RESOURCE)), 1)
-    const st = stationPositions(1)[0]
-    const local = [...p.values()].filter((q) => Math.abs(q.x - st.x) < 16 && q.scale > 0.6)
-    const inGlobal = [...p.values()].filter((q) => inRect(q, GLOBAL))
-    expect(local.length).toBe(CAPS.local) // P0 lane fills to the cap
-    expect(inGlobal.length).toBe(3) // the rest spill to the global queue
-  })
+
 })
 
 describe('zoneTotals', () => {
-  it('counts runnables across local queues consistently with placeIso balancing', () => {
-    const tot = zoneTotals(world(runnables(8, 0)), 4)
-    // balanced round-robin → 2 per P, nothing dumped on the global queue
-    expect(tot.local.reduce((a, b) => a + b, 0)).toBe(8)
-    expect(tot.global).toBe(0)
+  it('counts all runnable Gs without claiming local or global queue membership', () => {
+    const tot = zoneTotals(world(runnables(8, 0)))
+    expect(tot.global).toBe(8)
   })
 
   it('counts waiting and syscall', () => {
@@ -104,7 +73,6 @@ describe('zoneTotals', () => {
         { gid: 2, state: 'waiting', pid: -1, mid: -1, stolen: false },
         { gid: 3, state: 'syscall', pid: 0, mid: -1, stolen: false },
       ]),
-      4,
     )
     expect(tot.waiting).toBe(2)
     expect(tot.syscall).toBe(1)
